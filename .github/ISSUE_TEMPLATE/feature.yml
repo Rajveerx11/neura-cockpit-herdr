@@ -1,0 +1,33 @@
+name: Lean feature proposal
+description: Propose one small, measurable cockpit improvement.
+title: "Feature: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Workflow problem
+      description: Who needs this, and what current task is difficult?
+    validations:
+      required: true
+  - type: textarea
+    id: reuse
+    attributes:
+      label: Existing capability to reuse
+      description: Check native commands, F1/F4, bindings, tokens, and existing helpers first.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Smallest scope and non-goals
+      description: State config/helper/core scope. No daemon, database, new dependency, or default UI clutter without an explicit justification.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria and verification
+      description: Include edge cases, privacy, compatibility, rollback, and measurable checks. Never attach credentials, private paths, machine targets, clipboard data, or transcripts.
+    validations:
+      required: true

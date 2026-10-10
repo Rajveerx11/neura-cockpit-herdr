@@ -17,6 +17,16 @@ jobs:
           node-version: '22'
       - name: Mocked spawning and usage regressions
         run: node --test tests/spawn-agent.test.mjs plugins/neura-usage/usage-report.test.mjs
+      - name: Parse PowerShell scripts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse -Filter *.ps1 | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
       - name: Windows PowerShell rename regressions
         if: runner.os == 'Windows'
         shell: pwsh

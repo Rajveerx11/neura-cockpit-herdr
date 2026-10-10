@@ -2,7 +2,11 @@
 
 A Windows-first Herdr 0.9.3 configuration for visible terminal agents: warm Linux-style colors, native state labels, small harness marks, real account limits, readable Markdown, and explicit working directories. WSL and Noctty support files are included separately.
 
-This is a configuration bundle, not a Herdr fork or binary release. It does not connect to your machines, sync private notes/calendars, change your existing agents' folders, or trust CLI hooks.
+This repository tracks the shareable configuration and setup, not a Herdr fork or binary release. It does not connect to your machines, sync private notes/calendars, change your existing agents' folders, or trust CLI hooks.
+
+- [Setup map and local/SSH operating guide](docs/setup.md)
+- [Feature and bug tracker](https://github.com/Rajveerx11/neura-cockpit-herdr/issues)
+- [Lean-change policy](CONTRIBUTING.md): reuse native capabilities, keep additions opt-in, and avoid new daemons/dependencies or default UI clutter.
 
 ## Preview and install
 
@@ -80,9 +84,9 @@ Merge `noctty/config.ghostty` into your Noctty configuration after backing it up
 
 The usage plugin reads only current credentials maintained by supported CLIs, never refreshes them, and queries the corresponding account usage endpoints. It caches rendered usage and credential-file revision metadata, not access tokens or account identifiers. Account-quota windows come from the provider response; API-key-only auth does not invent subscription limits. Freshness is bounded to two minutes. Idle tokens expire; focus/state events or `Ctrl+Shift+U` refresh them.
 
-The optional `patches/windows-clipboard-paste-v0.9.3.patch` contains the missing Windows Unicode clipboard reader and Ctrl+V/Alt+V routing. It passed deterministic tests and an injected-key smoke test through a separate running Windows client. **The config installer does not apply the patch or replace your installed binary.** Physical-keyboard, fx/PI application paste, and SSH paths still need testing. Raycast keyword expansion is a separate integration and is not claimed fixed by this bundle.
+The optional `patches/windows-clipboard-paste-v0.9.3.patch` contains the missing Windows Unicode clipboard reader and Ctrl+V/Alt+V routing. It passed deterministic tests and an injected-key smoke test through a separate running Windows client. A separately built normal-profile client was activated on the reference setup, and the human confirmed text Ctrl+V works. **The config installer does not apply the patch or replace your installed binary.** Alt+V, screenshot/image paste, each harness, and SSH application paths need separate verification. Raycast keyword expansion is a separate integration and is not claimed fixed by this bundle.
 
-SSH machines must be configured using your own authorized target and authentication. No SSH aliases, keys, known-hosts files, private calendars, Obsidian notes, runtime sessions, clipboard/history databases, auth files, or usage caches are shipped. Remote agent discovery and synchronization are not claimed tested without an actual remote machine.
+SSH machines must be configured using your own authorized target and authentication. No SSH aliases, keys, known-hosts files, private calendars, Obsidian notes, runtime sessions, clipboard/history databases, auth files, or usage caches are shipped. Authorized remote 0.9.3 setup, reachability, and cross-machine workspace/pane discovery passed on the reference setup. Existing plain-SSH agents are not automatically adopted; complete remote agent lifecycle sync is not claimed verified. See [the SSH guide](docs/setup.md#ssh-over-an-existing-trusted-connection).
 
 ## Deterministic checks
 
