@@ -1,0 +1,482 @@
+--- a/src/client/mod.rs
++++ b/src/client/mod.rs
+@@ -104,6 +104,7 @@
+ };
+ #[cfg(windows)]
+ use clipboard_images::{read_image_file_from_client_events, should_bridge_clipboard_image_events};
++
+ #[cfg(unix)]
+ use clipboard_images::{read_image_file_from_terminal_drop, should_bridge_clipboard_image_paste};
+ pub use errors::ClientError;
+@@ -403,6 +404,20 @@
+             .shell
+             .as_ref()
+             .is_some_and(|shell| shell.endpoint_is_active(owner))
++}
++
++#[cfg(windows)]
++fn replace_wsl_clipboard_image_events(
++    events: &mut [crate::protocol::ClientInputEvent],
++    path: &str,
++    paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
++) {
++    let text = crate::platform::wsl_clipboard_paste_text(path);
++    for event in events {
++        if should_bridge_clipboard_image_events(std::slice::from_ref(event), true, paste_key) {
++            *event = crate::protocol::ClientInputEvent::Paste { text: text.clone() };
++        }
++    }
+ }
+ 
+ /// The main client event loop.
+@@ -1103,7 +1118,7 @@
+                 }
+             }
+             #[cfg(windows)]
+-            ClientLoopEvent::StdinEvents(events) => {
++            ClientLoopEvent::StdinEvents(mut events) => {
+                 let image_bridge_active = endpoint_accepts_local_images(
+                     is_remote_client,
+                     write_stream.active_id(),
+@@ -1123,23 +1138,57 @@
+                         .as_ref()
+                         .and_then(|shell| shell.clipboard_image_target());
+                     if let Some(target) = image_target.clone() {
+-                        if should_bridge_clipboard_image_events(
+-                            &events,
+-                            image_bridge_active,
+-                            state.remote_image_paste_key,
+-                        ) {
++                        let local_wsl_image_paste = !is_remote_client
++                            && write_stream.active_id().is_local()
++                            && write_stream.active_surface_available()
++                            && state
++                                .shell
++                                .as_ref()
++                                .is_some_and(|shell| shell.clipboard_image_targets_wsl())
++                            && events.iter().any(|event| {
++                                should_bridge_clipboard_image_events(
++                                    std::slice::from_ref(event),
++                                    true,
++                                    state.remote_image_paste_key,
++                                )
++                            });
++                        if local_wsl_image_paste
++                            || should_bridge_clipboard_image_events(
++                                &events,
++                                image_bridge_active,
++                                state.remote_image_paste_key,
++                            )
++                        {
+                             if let Some(image) = crate::platform::read_clipboard_image() {
+-                                write_remote_image_to_server(
+-                                    &mut write_stream,
+-                                    target,
+-                                    image,
+-                                    "clipboard paste",
+-                                )?;
+-                                continue;
+-                            }
+-                            info!(
+-                                "clipboard image paste trigger received, but local clipboard has no image"
+-                            );
++                                if local_wsl_image_paste {
++                                    match crate::platform::stage_clipboard_image_for_wsl(&image) {
++                                        Ok(text) => {
++                                            // Keep normal semantic paste routing/selection handling;
++                                            // never send Enter or reinterpret the path as a command.
++                                            replace_wsl_clipboard_image_events(
++                                                &mut events,
++                                                &text,
++                                                state.remote_image_paste_key,
++                                            );
++                                        }
++                                        Err(error) => {
++                                            warn!(%error, "local WSL clipboard image paste failed");
++                                        }
++                                    }
++                                } else {
++                                    write_remote_image_to_server(
++                                        &mut write_stream,
++                                        target,
++                                        image,
++                                        "clipboard paste",
++                                    )?;
++                                    continue;
++                                }
++                            } else {
++                                info!(
++                                    "clipboard image paste trigger received, but local clipboard has no image"
++                                );
++                            }
+                         }
+                         if let Some(image) =
+                             read_image_file_from_client_events(&events, image_bridge_active)
+--- a/src/client/shell/input.rs
++++ b/src/client/shell/input.rs
+@@ -1052,6 +1052,32 @@
+             .map(crate::protocol::ClientClipboardImageTarget::Pane)
+     }
+ 
++    #[cfg(any(windows, test))]
++    pub(crate) fn clipboard_image_targets_wsl(&self) -> bool {
++        let Some(crate::protocol::ClientClipboardImageTarget::Pane(pane_id)) =
++            self.clipboard_image_target()
++        else {
++            return false;
++        };
++        let Some(snapshot) = self.snapshot.as_deref() else {
++            return false;
++        };
++        let Some(pane) = snapshot.panes.iter().find(|pane| pane.pane_id == pane_id) else {
++            return false;
++        };
++        // fx has no native Windows executable; a local Windows fx pane is WSL.
++        // A POSIX foreground cwd also identifies WSL without relying on a label.
++        snapshot
++            .agents
++            .iter()
++            .any(|agent| agent.pane_id == pane_id && agent.agent.as_deref() == Some("fx"))
++            || pane
++                .foreground_cwd
++                .as_deref()
++                .or(pane.cwd.as_deref())
++                .is_some_and(|cwd| cwd.starts_with('/'))
++    }
++
+     fn popup_input_target(&self) -> Option<ClientInputTarget> {
+         self.popup_terminal_id
+             .as_ref()
+--- a/src/client/shell/tests/popup_focus_projection.rs
++++ b/src/client/shell/tests/popup_focus_projection.rs
+@@ -28,6 +28,114 @@
+     );
+     state.overlay = Some(ClientShellOverlay::Onboarding);
+     assert_eq!(state.clipboard_image_target(), None);
++}
++
++#[test]
++fn clipboard_image_wsl_routing_preserves_native_panes_and_modal_ownership() {
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    let mut resources = snapshot();
++    assert_eq!(resources.panes[0].foreground_cwd.as_deref(), Some("/repo"));
++    state.set_snapshot(Box::new(resources.clone()));
++    assert!(state.clipboard_image_targets_wsl());
++
++    resources.panes[0].cwd = Some(r"C:\repo".into());
++    resources.panes[0].foreground_cwd = Some(r"C:\repo".into());
++    state.set_snapshot(Box::new(resources.clone()));
++    assert!(!state.clipboard_image_targets_wsl());
++
++    resources.agents.push(ClientShellAgent {
++        pane_id: "pane_1".into(),
++        workspace_id: "ws_1".into(),
++        tab_id: "tab_1".into(),
++        name: None,
++        display_agent: None,
++        agent: Some("fx".into()),
++        title: None,
++        terminal_title: None,
++        terminal_title_stripped: None,
++        agent_status: AgentStatus::Idle,
++        state_change_seq: 0,
++        state_labels: Vec::new(),
++        tokens: Vec::new(),
++        focused: true,
++    });
++    state.set_snapshot(Box::new(resources.clone()));
++    assert!(state.clipboard_image_targets_wsl());
++    let mut missing_pane = resources.clone();
++    missing_pane.panes.clear();
++    state.set_snapshot(Box::new(missing_pane));
++    assert!(!state.clipboard_image_targets_wsl());
++    // An unrelated fx pane must never redirect a native Windows paste.
++    resources.agents[0].pane_id = "other-pane".into();
++    state.set_snapshot(Box::new(resources));
++    assert!(!state.clipboard_image_targets_wsl());
++
++    state.set_snapshot(Box::new(snapshot()));
++    state.mode = ClientShellMode::Prefix;
++    assert!(!state.clipboard_image_targets_wsl());
++    state.mode = ClientShellMode::Copy;
++    assert!(!state.clipboard_image_targets_wsl());
++    state.mode = ClientShellMode::Terminal;
++    state.overlay = Some(ClientShellOverlay::Onboarding);
++    assert!(!state.clipboard_image_targets_wsl());
++    state.overlay = None;
++    state.popup_pending = true;
++    assert!(!state.clipboard_image_targets_wsl());
++    state.popup_pending = false;
++    state.set_pane_surface(surface_with_popup());
++    assert!(!state.clipboard_image_targets_wsl());
++}
++
++#[cfg(windows)]
++#[test]
++fn clipboard_image_windows_triggers_preserve_text_and_semantic_paste() {
++    use crate::client::clipboard_images::should_bridge_clipboard_image_events;
++    use crate::protocol::ClientInputEvent;
++    use crossterm::event::{Event, KeyEvent};
++
++    let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
++    let key = ClientInputEvent::from_crossterm(Event::Key(KeyEvent::new(
++        KeyCode::Char('v'),
++        KeyModifiers::CONTROL,
++    )))
++    .unwrap();
++    assert!(should_bridge_clipboard_image_events(
++        std::slice::from_ref(&key),
++        true,
++        Some(ctrl_v)
++    ));
++    assert!(!should_bridge_clipboard_image_events(&[key], true, None));
++    let empty = ClientInputEvent::Paste {
++        text: String::new(),
++    };
++    assert!(should_bridge_clipboard_image_events(
++        std::slice::from_ref(&empty),
++        true,
++        None
++    ));
++    assert!(!should_bridge_clipboard_image_events(
++        &[empty],
++        false,
++        Some(ctrl_v)
++    ));
++    assert!(!should_bridge_clipboard_image_events(
++        &[ClientInputEvent::Paste {
++            text: "ordinary text".into()
++        }],
++        true,
++        Some(ctrl_v),
++    ));
++
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    state.set_snapshot(Box::new(snapshot()));
++    let text = crate::platform::wsl_clipboard_paste_text("/mnt/c/Test User/image.png");
++    let outcome = state.handle_client_events(&[ClientInputEvent::Paste { text: text.clone() }]);
++    assert!(matches!(
++        &outcome.requests[..],
++        [ClientMessage::ClientShellPaneInput { pane_id, events }]
++            if pane_id == "pane_1"
++                && matches!(&events[..], [ClientPaneInputEvent::Paste(value)] if value == &text)
++    ));
+ }
+ 
+ #[test]
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -2456,6 +2456,140 @@
+     }
+ }
+ 
++/// Reuse bounded image staging, translating the path through the local WSL
++/// distribution instead of assuming its automount prefix. Never changes the clipboard.
++pub(crate) fn stage_clipboard_image_for_wsl(image: &ClipboardImage) -> std::io::Result<String> {
++    use std::process::Stdio;
++    if image.bytes.len() > crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD {
++        return Err(std::io::Error::other(
++            "clipboard image exceeds the payload limit",
++        ));
++    }
++    let staged = crate::server::clipboard_image::stage(
++        u64::from(std::process::id()),
++        image.extension,
++        &image.bytes,
++    )?;
++    let converted = (|| {
++        // shortcut: uses default WSL distribution; select per-pane distro for multi-distro support.
++        let mut child = crate::noninteractive_process::command("wsl.exe")
++            .args(["--exec", "wslpath", "-u"])
++            .arg(&staged.path)
++            .stdin(Stdio::null())
++            .stdout(Stdio::piped())
++            .stderr(Stdio::null())
++            .spawn()?;
++        let deadline = Instant::now() + Duration::from_secs(3);
++        while child.try_wait()?.is_none() {
++            if Instant::now() >= deadline {
++                let _ = child.kill();
++                let _ = child.wait();
++                return Err(std::io::Error::new(
++                    std::io::ErrorKind::TimedOut,
++                    "WSL image path translation timed out",
++                ));
++            }
++            std::thread::sleep(Duration::from_millis(10));
++        }
++        let output = child.wait_with_output()?;
++        if !output.status.success() {
++            return Err(std::io::Error::other("WSL image path translation failed"));
++        }
++        parse_wsl_clipboard_path(&output.stdout)
++    })();
++    if converted.is_err() {
++        crate::server::clipboard_image::remove_files(vec![staged.path]);
++    }
++    converted
++}
++
++pub(crate) fn wsl_clipboard_paste_text(path: &str) -> String {
++    // Keep one fx image token, also safe if the user later submits it to a POSIX shell.
++    format!(
++        "\"{}\"",
++        path.replace('\\', "\\\\")
++            .replace('"', "\\\"")
++            .replace('$', "\\$")
++            .replace('`', "\\`")
++    )
++}
++
++#[cfg(test)]
++#[test]
++fn wsl_clipboard_paste_text_quotes_spaces_and_shell_metacharacters() {
++    assert_eq!(
++        wsl_clipboard_paste_text("/mnt/c/Users/Test User/image.png"),
++        "\"/mnt/c/Users/Test User/image.png\""
++    );
++    assert_eq!(
++        wsl_clipboard_paste_text("/tmp/a'\\\"$`;.png"),
++        "\"/tmp/a'\\\\\\\"\\$\\`;.png\""
++    );
++}
++
++fn parse_wsl_clipboard_path(output: &[u8]) -> std::io::Result<String> {
++    let path = std::str::from_utf8(output)
++        .map_err(|_| std::io::Error::other("WSL image path is not UTF-8"))?
++        .trim_end_matches(['\r', '\n']);
++    if !path.starts_with('/') || path.chars().any(char::is_control) {
++        return Err(std::io::Error::other(
++            "WSL image path is not a single absolute path",
++        ));
++    }
++    Ok(path.to_owned())
++}
++
++#[cfg(test)]
++#[test]
++fn wsl_clipboard_path_requires_one_absolute_path_and_preserves_spaces() {
++    assert_eq!(
++        parse_wsl_clipboard_path(b"/mnt/c/Users/Test User/image.png\r\n").unwrap(),
++        "/mnt/c/Users/Test User/image.png"
++    );
++    for invalid in [
++        &b"C:\\image.png"[..],
++        b"",
++        b"relative.png",
++        b"/tmp/one\n/tmp/two",
++        b"/tmp/\xff",
++    ] {
++        assert!(parse_wsl_clipboard_path(invalid).is_err());
++    }
++}
++
++#[cfg(test)]
++#[test]
++#[ignore = "requires local WSL; uses a generated PNG and never touches the clipboard"]
++fn wsl_clipboard_image_staging_roundtrip() {
++    let mut bytes = Vec::new();
++    {
++        let mut encoder = png::Encoder::new(&mut bytes, 1, 1);
++        encoder.set_color(png::ColorType::Rgba);
++        encoder.set_depth(png::BitDepth::Eight);
++        encoder
++            .write_header()
++            .unwrap()
++            .write_image_data(&[0, 0, 0, 255])
++            .unwrap();
++    }
++    let image = ClipboardImage {
++        bytes,
++        extension: "png",
++    };
++    let path = stage_clipboard_image_for_wsl(&image).expect("stage generated PNG for WSL");
++    let output = crate::noninteractive_process::command("wsl.exe")
++        .args(["--exec", "cat", "--", &path])
++        .output()
++        .expect("read own staged PNG from WSL");
++    assert!(output.status.success());
++    assert_eq!(output.stdout, image.bytes);
++    let cleanup = crate::noninteractive_process::command("wsl.exe")
++        .args(["--exec", "rm", "--", &path])
++        .status()
++        .expect("remove own fixture");
++    assert!(cleanup.success());
++}
++
+ pub fn read_clipboard_image() -> Option<ClipboardImage> {
+     for attempt in 0..10 {
+         if unsafe { OpenClipboard(null_mut()) } != 0 {
+--- a/src/client/tests/mod.rs
++++ b/src/client/tests/mod.rs
+@@ -253,6 +253,70 @@
+         b"v",
+         true,
+         Some(ctrl_v)
++    ));
++}
++
++#[cfg(windows)]
++#[test]
++fn wsl_clipboard_image_batch_preserves_unrelated_input_and_resize_without_enter() {
++    use crate::protocol::ClientInputEvent;
++    use crossterm::event::{Event, KeyEvent};
++
++    let key = |code, modifiers| {
++        ClientInputEvent::from_crossterm(Event::Key(KeyEvent::new(code, modifiers))).unwrap()
++    };
++    let unrelated_key = key(
++        crossterm::event::KeyCode::Char('x'),
++        crossterm::event::KeyModifiers::NONE,
++    );
++    let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
++    let nonempty_paste = ClientInputEvent::Paste {
++        text: "ordinary text".into(),
++    };
++    let text_commit = ClientInputEvent::TextCommit("typed text".into());
++    let mut batch = [
++        ClientLoopEvent::Resize(120, 40, 8, 16, true),
++        ClientLoopEvent::StdinEvents(vec![
++            unrelated_key.clone(),
++            key(ctrl_v.0, ctrl_v.1),
++            nonempty_paste.clone(),
++            ClientInputEvent::Paste {
++                text: String::new(),
++            },
++            text_commit.clone(),
++            ClientInputEvent::FocusLost,
++        ]),
++        ClientLoopEvent::Resize(121, 41, 9, 18, false),
++    ];
++    let ClientLoopEvent::StdinEvents(events) = &mut batch[1] else {
++        panic!("stdin batch")
++    };
++    replace_wsl_clipboard_image_events(events, "/mnt/c/Test User/image.png", Some(ctrl_v));
++    let image_paste = ClientInputEvent::Paste {
++        text: "\"/mnt/c/Test User/image.png\"".into(),
++    };
++    assert_eq!(
++        events,
++        &vec![
++            unrelated_key,
++            image_paste.clone(),
++            nonempty_paste,
++            image_paste,
++            text_commit,
++            ClientInputEvent::FocusLost,
++        ]
++    );
++    assert!(!events.iter().any(|event| matches!(
++        event.to_raw_input_event(),
++        crate::raw_input::RawInputEvent::Key(key) if key.code == crossterm::event::KeyCode::Enter
++    )));
++    assert!(matches!(
++        batch[0],
++        ClientLoopEvent::Resize(120, 40, 8, 16, true)
++    ));
++    assert!(matches!(
++        batch[2],
++        ClientLoopEvent::Resize(121, 41, 9, 18, false)
+     ));
+ }
+ 

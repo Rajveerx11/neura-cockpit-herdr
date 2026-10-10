@@ -13,5 +13,9 @@ Herdr 0.9.3 and its cached detection manifest, under Apache-2.0.
 The local Codex override adds startup hook-review dialog detection.
 The optional clipboard patch changes Windows text clipboard reading and shortcut
 routing; it is not applied by the installer and is not an upstream release.
+The optional Windows-to-WSL image patch also derives from Herdr 0.9.3.
+The optional fx lifecycle patch derives from vercel-labs/fx v0.0.13,
+commit 4d966e272cfc4296cdf703f409480088cf2e72ba, under Apache-2.0.
+These modified-source patches are independent local fixes, not vendor releases.
 Harness names and their text-mode marks identify their respective products and
 do not imply endorsement. No terminal executable or vendor dependency is bundled.

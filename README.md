@@ -88,10 +88,16 @@ The optional `patches/windows-clipboard-paste-v0.9.3.patch` contains the missing
 
 SSH machines must be configured using your own authorized target and authentication. No SSH aliases, keys, known-hosts files, private calendars, Obsidian notes, runtime sessions, clipboard/history databases, auth files, or usage caches are shipped. Authorized remote 0.9.3 setup, reachability, and cross-machine workspace/pane discovery passed on the reference setup. Existing plain-SSH agents are not automatically adopted; complete remote agent lifecycle sync is not claimed verified. See [the SSH guide](docs/setup.md#ssh-over-an-existing-trusted-connection).
 
+## Bug fixes before enhancements
+
+Codex now uses the distinct `>_` compact mark, not a Claude-like star. The plugin only updates branding tokens, never lifecycle state. The reference setup's live token was verified.
+
+Optional source patches for stale fx blocked-state and local Windows-to-WSL screenshot paste are documented in [the bug-fix guide](docs/bug-fixes.md). They are regression-tested but not automatically installed or claimed live-verified. Existing agents and servers are preserved; no new daemon, dependency, or protocol is added. Enhancements remain deferred.
+
 ## Deterministic checks
 
 ```powershell
-node --test tests/spawn-agent.test.mjs plugins/neura-usage/usage-report.test.mjs
+node --test tests/spawn-agent.test.mjs tests/branding.test.mjs plugins/neura-usage/usage-report.test.mjs
 powershell.exe -NoProfile -File tests/rename-context.tests.ps1
 powershell.exe -NoProfile -File tests/install-stage.tests.ps1
 ```

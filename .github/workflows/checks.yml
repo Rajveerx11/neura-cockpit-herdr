@@ -15,8 +15,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Mocked spawning and usage regressions
-        run: node --test tests/spawn-agent.test.mjs plugins/neura-usage/usage-report.test.mjs
+      - name: Mocked spawning, branding and usage regressions
+        run: node --test tests/spawn-agent.test.mjs tests/branding.test.mjs plugins/neura-usage/usage-report.test.mjs
+      - name: Parse optional patch verification helper
+        if: runner.os == 'Linux'
+        run: |
+          bash -n tools/test-fx-herdr-state.sh
+          git apply --numstat patches/fx-herdr-resume-v0.0.13.patch
+          git apply --numstat patches/windows-wsl-image-paste-v0.9.3.patch
       - name: Parse PowerShell scripts
         if: runner.os == 'Windows'
         shell: pwsh

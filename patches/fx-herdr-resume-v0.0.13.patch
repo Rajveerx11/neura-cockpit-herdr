@@ -1,0 +1,241 @@
+diff --git a/src/builtins/hooks.zig b/src/builtins/hooks.zig
+index 0ee675c..49538b1 100644
+--- a/src/builtins/hooks.zig
++++ b/src/builtins/hooks.zig
+@@ -45,6 +45,10 @@ pub fn Runtime(comptime App: type) type {
+             app.herdr.reportState(.working, null);
+         }
+ 
++        pub fn reportResumed(app: *App, working: bool) void {
++            app.herdr.reportResumed(working);
++        }
++
+         fn postTurnEndHandler(
+             raw: *anyopaque,
+             input: hooks.PostTurnEndInput,
+@@ -153,6 +157,14 @@ test "built-in Herdr hooks report only interactive lifecycle state" {
+         .invocation = testInvocation(.interactive),
+         .kind = .route_recovery,
+     });
++    view.runAttentionRequired(.{
++        .invocation = testInvocation(.subagent),
++        .kind = .permission,
++    });
++    view.runPostTurnEnd(.{
++        .invocation = testInvocation(.subagent),
++        .outcome = .completed,
++    });
+ 
+     try std.testing.expectEqual(@as(usize, 6), app.herdr.report_count);
+     try expectReport(app.herdr.reports[0], .idle, null);
+diff --git a/src/builtins/hooks/herdr.zig b/src/builtins/hooks/herdr.zig
+index 804daf5..3aa2a7b 100644
+--- a/src/builtins/hooks/herdr.zig
++++ b/src/builtins/hooks/herdr.zig
+@@ -22,6 +22,7 @@ const agent_name = "fx";
+ 
+ const Request = union(enum) {
+     report: struct { state: State, custom_status: ?[]const u8 },
++    resumed_report: State,
+     session: []const u8,
+     /// null clears the pane label.
+     pane_rename: ?[]const u8,
+@@ -37,6 +38,7 @@ pub const Client = struct {
+     socket_path: []u8 = &.{},
+     pane_id: []u8 = &.{},
+     next_id: u64 = 1,
++    reported_state: ?State = null,
+ 
+     pub fn shouldEnable(
+         fx_herdr: ?[]const u8,
+@@ -99,6 +101,10 @@ pub const Client = struct {
+         self.send(.{ .report = .{ .state = state, .custom_status = clampStatus(custom_status) } });
+     }
+ 
++    pub fn reportResumed(self: *Client, working: bool) void {
++        self.send(.{ .resumed_report = if (working) .working else .idle });
++    }
++
+     /// Report fx's session id so herdr can associate the pane with a resumable
+     /// session. Does not affect herdr's semantic state.
+     pub fn reportSession(self: *Client, session_id: []const u8) void {
+@@ -147,6 +153,15 @@ pub const Client = struct {
+     }
+ 
+     fn sendLocked(self: *Client, request: Request) !void {
++        switch (request) {
++            .report => |r| self.reported_state = r.state,
++            .resumed_report => |state| {
++                // A turn-end report may have already cleared the attention wait.
++                if (self.reported_state != .blocked) return;
++                self.reported_state = state;
++            },
++            else => {},
++        }
+         const io = io_mod.getIo();
+         var stream = try self.connectLocked();
+         defer stream.close(io);
+@@ -158,6 +173,7 @@ pub const Client = struct {
+         const id = self.takeIdLocked();
+         switch (request) {
+             .report => |r| try writeReportAgent(w, id, self.pane_id, r.state, r.custom_status),
++            .resumed_report => |state| try writeReportAgent(w, id, self.pane_id, state, null),
+             .session => |session_id| try writeReportAgentSession(w, id, self.pane_id, session_id),
+             .pane_rename => |label| try writeRename(w, id, "pane.rename", "pane_id", self.pane_id, "label", label),
+             .agent_rename => |name| try writeRename(w, id, "agent.rename", "target", self.pane_id, "name", name),
+@@ -293,6 +309,25 @@ test "shouldEnable requires both socket path and pane id" {
+     try std.testing.expect(!Client.shouldEnable(null, "/tmp/herdr.sock", ""));
+ }
+ 
++test "Herdr resumes only blocked reports without reviving a finished turn" {
++    // An empty socket address cannot reach a live Herdr server.
++    var client = Client{ .enabled = true };
++    client.reportState(.blocked, "question");
++    client.reportResumed(true);
++    try std.testing.expectEqual(State.working, client.reported_state.?);
++    client.reportResumed(false);
++    try std.testing.expectEqual(State.working, client.reported_state.?);
++
++    client.reportState(.blocked, "permission");
++    client.reportResumed(false);
++    try std.testing.expectEqual(State.idle, client.reported_state.?);
++
++    client.reportState(.blocked, "recovery");
++    client.reportState(.idle, null);
++    client.reportResumed(true);
++    try std.testing.expectEqual(State.idle, client.reported_state.?);
++}
++
+ test "shouldEnable honors FX_HERDR opt-out" {
+     try std.testing.expect(!Client.shouldEnable("0", "/tmp/herdr.sock", "w1:p1"));
+     try std.testing.expect(!Client.shouldEnable("false", "/tmp/herdr.sock", "w1:p1"));
+diff --git a/src/core/app/app_worker_runtime.zig b/src/core/app/app_worker_runtime.zig
+index 5c7377d..6e137ba 100644
+--- a/src/core/app/app_worker_runtime.zig
++++ b/src/core/app/app_worker_runtime.zig
+@@ -791,6 +791,11 @@ pub fn Runtime(comptime App: type) type {
+                     snapshot.queued_count > 0);
+             const awaiting_tool_terminal = snapshot.cancel_requested and
+                 activeToolStatusCount(presenter) > 0;
++            if (!modal_active) {
++                if (comptime @hasDecl(App, "reportAttentionResolved")) {
++                    app.reportAttentionResolved(visible_worker_active or awaiting_tool_terminal);
++                }
++            }
+             if (!modal_active and
+                 !visible_worker_active and
+                 !awaiting_tool_terminal and
+@@ -1915,6 +1920,7 @@ const FakeApp = struct {
+     attention_count: usize = 0,
+     last_attention_turn_id: u64 = 0,
+     last_attention_kind: ?@import("../hooks/hooks.zig").AttentionKind = null,
++    herdr: @import("../../builtins/hooks.zig").Client = .{},
+     persisted_finishes: std.ArrayList(types.FinishedPrompt) = .empty,
+     finish_persistence_error: ?anyerror = null,
+ 
+@@ -2004,6 +2010,11 @@ const FakeApp = struct {
+         self.attention_count += 1;
+         self.last_attention_turn_id = turn_id;
+         self.last_attention_kind = kind;
++        self.herdr.reportState(.blocked, @tagName(kind));
++    }
++
++    fn reportAttentionResolved(self: *FakeApp, working: bool) void {
++        @import("../../builtins/hooks.zig").Runtime(FakeApp).reportResumed(self, working);
+     }
+ };
+ 
+@@ -3423,6 +3434,78 @@ test "core.app_worker_runtime syncState clears a completed question" {
+     try std.testing.expect(app.shell.render_requests.hasReason(.modal));
+ }
+ 
++test "core.app_worker_runtime Herdr resumes resolved attention and preserves real blockers" {
++    const sources = [_]?worker_runtime.QuestionPromptSource{
++        null, .agent_question, .mcp_elicitation, .route_recovery,
++    };
++    for (sources) |source| {
++        for ([_]bool{ true, false }) |working| {
++            const expected: @import("../../builtins/hooks/herdr.zig").State = if (working) .working else .idle;
++            var app = FakeApp.init(std.testing.allocator);
++            defer app.deinit();
++            // Report locally through the real client, never to a live pane.
++            app.herdr.enabled = true;
++            app.worker.processing = true;
++            app.stream.active = true;
++            if (source) |question_source| {
++                app.worker.pending_question = true;
++                app.worker.pending_question_source = question_source;
++                try app.worker.pushEvent(std.heap.c_allocator, .question_requested);
++                try Runtime(FakeApp).tick(&app, NoopBridge.handlers(&app));
++            } else {
++                app.worker.pending_permission_request = .{ .id = 42, .label = "run command" };
++                Runtime(FakeApp).syncState(&app, NoopBridge.lifecyclePresenter(&app));
++            }
++            try std.testing.expectEqual(.blocked, app.herdr.reported_state.?);
++
++            // Child/background activity cannot clear a foreground prompt.
++            app.subagents.child_busy = true;
++            app.subagents.view_active = true;
++            Runtime(FakeApp).syncState(&app, NoopBridge.lifecyclePresenter(&app));
++            try std.testing.expectEqual(.blocked, app.herdr.reported_state.?);
++
++            app.worker.pending_permission_request = null;
++            app.worker.pending_question = false;
++            // Input handlers clear the UI before the next worker sync.
++            app.question_prompt.active = false;
++            app.worker.processing = working;
++            Runtime(FakeApp).syncState(&app, NoopBridge.lifecyclePresenter(&app));
++            try std.testing.expectEqual(expected, app.herdr.reported_state.?);
++            Runtime(FakeApp).syncState(&app, NoopBridge.lifecyclePresenter(&app));
++            try std.testing.expectEqual(expected, app.herdr.reported_state.?);
++        }
++    }
++}
++
++test "core.app_worker_runtime Herdr keeps a remaining question blocked after approval resolves" {
++    var app = FakeApp.init(std.testing.allocator);
++    defer app.deinit();
++    app.herdr.enabled = true;
++    app.worker.processing = true;
++    app.stream.active = true;
++    app.worker.pending_permission_request = .{ .id = 42, .label = "run command" };
++    app.worker.pending_question = true;
++    app.question_prompt.active = true;
++    Runtime(FakeApp).syncState(&app, NoopBridge.lifecyclePresenter(&app));
++    app.worker.pending_permission_request = null;
++    Runtime(FakeApp).syncState(&app, NoopBridge.lifecyclePresenter(&app));
++    try std.testing.expectEqual(.blocked, app.herdr.reported_state.?);
++}
++
++test "core.app_worker_runtime Herdr clears cancelled attention without reporting work" {
++    var app = FakeApp.init(std.testing.allocator);
++    defer app.deinit();
++    app.herdr.enabled = true;
++    app.worker.processing = true;
++    app.stream.active = true;
++    app.worker.pending_permission_request = .{ .id = 42, .label = "run command" };
++    Runtime(FakeApp).syncState(&app, NoopBridge.lifecyclePresenter(&app));
++    app.worker.pending_permission_request = null;
++    app.worker.worker_cancel_requested.store(true, .seq_cst);
++    Runtime(FakeApp).syncState(&app, NoopBridge.lifecyclePresenter(&app));
++    try std.testing.expectEqual(.idle, app.herdr.reported_state.?);
++}
++
+ test "core.app_worker_runtime cancellation ignores late tool progress before turn finalization" {
+     var app = FakeApp.init(std.testing.allocator);
+     defer app.deinit();
+diff --git a/src/main.zig b/src/main.zig
+index 6ac252f..9d355ac 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -820,6 +820,10 @@ const App = struct {
+         NotificationAppRuntime.dispatchAttentionRequired(self, turn_id, kind);
+     }
+ 
++    pub fn reportAttentionResolved(self: *App, working: bool) void {
++        HerdrAppRuntime.reportResumed(self, working);
++    }
++
+     /// Must be called after init() returns so the AutoUpgrade thread
+     /// captures a pointer to the final App location (not a temporary).
+     pub fn startAutoUpgrade(self: *App) void {

@@ -10,8 +10,8 @@ export const LEGACY_CAPTION = 'herdr_brand_caption';
 export const LEGACY_MARKER = 'herdr_brand_harness';
 export const ROW_KEYS = Array.from({ length: 6 }, (_, i) => `herdr_brand_row${i + 1}`);
 export const ICON_KEY = 'herdr_brand_icon';
-// Text-mode logo approximations: one cell, except the two-cell fx wordmark.
-export const ICONS = { pi: 'π', claude: '✳', codex: '❋', gemini: '✦', hermes: '☤', opencode: '▣', fx: 'ƒx', deepseek: '≈', neura: 'N' };
+// Compact text-mode marks; fx and Codex use distinct two-cell wordmarks.
+export const ICONS = { pi: 'π', claude: '✳', codex: '>_', gemini: '✦', hermes: '☤', opencode: '▣', fx: 'ƒx', deepseek: '≈', neura: 'N' };
 const exec = promisify(execFile);
 const badges = JSON.parse(fs.readFileSync(new URL('./badges.json', import.meta.url), 'utf8'));
 const aliases = { 'claude-code': 'claude', 'gemini-cli': 'gemini', 'deepseek-tui': 'deepseek' };
