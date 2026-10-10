@@ -1,0 +1,202 @@
+# Neura Cockpit — global configuration validated on Herdr 0.9.3.
+# Keep this file on documented Herdr surfaces; validate with `herdr config check`.
+
+onboarding = false
+
+[theme]
+# Ubuntu GNOME Terminal canvas with a warm, brown-tinted Catppuccin sidebar.
+# Semantic colors follow the supplied terminal palette.
+name = "terminal"
+
+[theme.custom]
+panel_bg = "reset"
+sidebar_bg = "reset"
+active_row_bg = "#3a302b"
+selection_bg = "#4a3b34"
+surface0 = "#2d2622"
+surface1 = "#382e29"
+surface_dim = "#1b1715"
+overlay0 = "#555555"
+overlay1 = "#bbbbbb"
+text = "#ffffff"
+subtext0 = "#bbbbbb"
+accent = "#bbbb00"
+red = "#ff5555"     # red
+yellow = "#ffff55"  # brown / bright yellow in the supplied palette
+green = "#55ff55"   # green
+blue = "#5555ff"    # blue
+teal = "#55ffff"    # cyan
+mauve = "#ff55ff"   # magenta
+peach = "#bb0000"   # light red / elevated attention
+
+[terminal]
+new_cwd = "follow"
+
+[keys]
+prefix = "§"
+# F1 opens Herdr's searchable help panel with every effective binding and description.
+help = ["prefix+?", "f1"]
+settings = ["prefix+s", "f10"]
+# Reload both client-side appearance/keybindings and server configuration.
+reload_config = "ctrl+shift+r"
+# Create a new Space (workspace) from anywhere in Herdr.
+new_workspace = "ctrl+n"
+# F2 opens Agent / Workspace / Both checkboxes. Keep native rename as a fallback.
+rename_workspace = "prefix+shift+w"
+new_tab = ["prefix+c", "ctrl+t"]
+close_tab = ["prefix+shift+x", "ctrl+w"]
+goto = ["prefix+g", "ctrl+k"]
+previous_tab = ["prefix+p", "ctrl+left"]
+next_tab = ["prefix+n", "ctrl+right"]
+previous_workspace = "ctrl+up"
+next_workspace = "ctrl+down"
+cycle_pane_next = ["prefix+tab", "alt+up"]
+cycle_pane_previous = ["prefix+shift+tab", "alt+down"]
+
+# Leaf Markdown picker/watch view in a popup, rooted at the focused local pane cwd.
+# Select a note to preview; Leaf never edits it unless its editor action is chosen.
+[[keys.command]]
+key = ["ctrl+shift+m", "prefix+m"]
+type = "popup"
+command = "powershell.exe -NoProfile -Command \"& '@LEAF_EXE@' --watch --picker\""
+description = "Preview Markdown with Leaf (local)"
+width = "90%"
+height = "90%"
+
+# Lazygit over the focused pane. q closes it.
+[[keys.command]]
+key = ["ctrl+shift+g", "prefix+d"]
+type = "popup"
+command = "cd /d \"%HERDR_ACTIVE_PANE_CWD%\" && lazygit"
+description = "Git status"
+width = "90%"
+height = "85%"
+
+# F4 explains the actual cwd, visible agent states, and available shortcuts.
+[[keys.command]]
+key = "f4"
+type = "popup"
+command = "powershell.exe -NoProfile -File \"@HERDR_CONFIG_DIR@/tools/cockpit-status.ps1\""
+description = "Cockpit context / folders / states"
+width = "90%"
+height = "85%"
+
+# Terminal-native rename selection; no background service or native GUI.
+[[keys.command]]
+key = "f2"
+type = "popup"
+command = "powershell.exe -NoProfile -File \"@HERDR_CONFIG_DIR@/tools/rename-context.ps1\""
+description = "Rename Agent / Workspace / Both"
+width = "70%"
+height = 16
+
+[[keys.command]]
+key = ["prefix+shift+u", "ctrl+shift+u"]
+type = "plugin_action"
+command = "neura.usage.refresh"
+description = "Refresh agent usage"
+
+[ui]
+sidebar_width = 36
+sidebar_min_width = 28
+sidebar_max_width = 44
+sidebar_start_collapsed = false
+sidebar_collapsed_mode = "compact"
+agent_panel_sort = "spaces"
+status_indicators = "symbols"
+copy_on_select = true
+confirm_close = true
+prompt_new_tab_name = false
+prompt_new_workspace_name = false
+pane_borders = "always"
+pane_outer_borders = true
+pane_scrollbars = true
+pane_gaps = true
+show_agent_labels_on_pane_borders = true
+hide_tab_bar_when_single_tab = false
+tab_bar_position = "top"
+accent = "#bbbb00"
+tab_bar_right = [
+  { type = "zoom" },
+  { type = "text", text = "F1 KEYS" },
+  { type = "text", text = "NEURA COCKPIT" },
+  { type = "hostname" },
+  { type = "datetime", format = "%a %d %b · %H:%M" },
+]
+tab_bar_right_separator = "  │  "
+window_title = "NEURA COCKPIT · {workspace} · {tab} · {terminal_title}"
+
+[ui.sidebar.agents]
+# Small inline harness marks beside native status; no multi-line logo rows.
+"row_gap" = 0
+rows = [
+  ["state_icon", { "token" = "$herdr_brand_icon", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "✳", "fg" = "#d97757" }, { "equals" = "✦", "fg" = "#55aaff" }, { "equals" = "☤", "fg" = "#ffcc66" }, { "equals" = "ƒx", "fg" = "#55ffff" }, { "equals" = "≈", "fg" = "#5555ff" }, { "equals" = "N", "fg" = "#55ffff" }] }, { "token" = "agent", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "fx", "hide" = true }, { "equals" = "deepseek", "hide" = true }, { "equals" = "deepseek-tui", "hide" = true }] }, { "token" = "state_text", "fg" = "#bbbbbb", "rules" = [{ "equals" = "blocked", "ignore_case" = true, "fg" = "#ff5555", "bold" = true }, { "equals" = "working", "ignore_case" = true, "fg" = "#ffff55", "bold" = true }, { "equals" = "done", "ignore_case" = true, "fg" = "#55ffff" }, { "equals" = "idle", "ignore_case" = true, "fg" = "#55ff55" }] }],
+  [{ "token" = "$mode", "fg" = "#bbbb00", "bold" = true }, { "token" = "$phase", "fg" = "#bbbbbb" }],
+  [{ "token" = "$usage", "fg" = "#ffff55", "bold" = true, "dim" = false }],
+  [{ "token" = "machine", "fg" = "#55ffff", "bold" = true, "rules" = [{ "equals" = "Local", "fg" = "#bbbbbb", "bold" = false }] }, { "token" = "workspace", "fg" = "#ff55ff" }, { "token" = "tab", "fg" = "#bbbbbb" }, { "token" = "pane", "fg" = "#bbbbbb", "dim" = false }],
+]
+
+[ui.sidebar.agents.rows_by_agent]
+"pi" = [
+  ["state_icon", { "token" = "$herdr_brand_icon", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "✳", "fg" = "#d97757" }, { "equals" = "✦", "fg" = "#55aaff" }, { "equals" = "☤", "fg" = "#ffcc66" }, { "equals" = "ƒx", "fg" = "#55ffff" }, { "equals" = "≈", "fg" = "#5555ff" }, { "equals" = "N", "fg" = "#55ffff" }] }, { "token" = "agent", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "pi", "hide" = true }, { "equals" = "Neura", "hide" = true }] }, { "token" = "state_text", "fg" = "#bbbbbb", "rules" = [{ "equals" = "blocked", "ignore_case" = true, "fg" = "#ff5555", "bold" = true }, { "equals" = "working", "ignore_case" = true, "fg" = "#ffff55", "bold" = true }, { "equals" = "done", "ignore_case" = true, "fg" = "#55ffff" }, { "equals" = "idle", "ignore_case" = true, "fg" = "#55ff55" }] }],
+  [{ "token" = "$mode", "fg" = "#bbbb00", "bold" = true }, { "token" = "$phase", "fg" = "#bbbbbb" }],
+  [{ "token" = "$usage", "fg" = "#ffff55", "bold" = true, "dim" = false }],
+  [{ "token" = "machine", "fg" = "#55ffff", "bold" = true, "rules" = [{ "equals" = "Local", "fg" = "#bbbbbb", "bold" = false }] }, { "token" = "workspace", "fg" = "#ff55ff" }, { "token" = "tab", "fg" = "#bbbbbb" }, { "token" = "pane", "fg" = "#bbbbbb", "dim" = false }],
+]
+"claude" = [
+  ["state_icon", { "token" = "$herdr_brand_icon", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "✳", "fg" = "#d97757" }, { "equals" = "✦", "fg" = "#55aaff" }, { "equals" = "☤", "fg" = "#ffcc66" }, { "equals" = "ƒx", "fg" = "#55ffff" }, { "equals" = "≈", "fg" = "#5555ff" }, { "equals" = "N", "fg" = "#55ffff" }] }, { "token" = "agent", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "claude", "hide" = true }] }, { "token" = "state_text", "fg" = "#bbbbbb", "rules" = [{ "equals" = "blocked", "ignore_case" = true, "fg" = "#ff5555", "bold" = true }, { "equals" = "working", "ignore_case" = true, "fg" = "#ffff55", "bold" = true }, { "equals" = "done", "ignore_case" = true, "fg" = "#55ffff" }, { "equals" = "idle", "ignore_case" = true, "fg" = "#55ff55" }] }],
+  [{ "token" = "$mode", "fg" = "#bbbb00", "bold" = true }, { "token" = "$phase", "fg" = "#bbbbbb" }],
+  [{ "token" = "$usage", "fg" = "#ffff55", "bold" = true, "dim" = false }],
+  [{ "token" = "machine", "fg" = "#55ffff", "bold" = true, "rules" = [{ "equals" = "Local", "fg" = "#bbbbbb", "bold" = false }] }, { "token" = "workspace", "fg" = "#ff55ff" }, { "token" = "tab", "fg" = "#bbbbbb" }, { "token" = "pane", "fg" = "#bbbbbb", "dim" = false }],
+]
+"codex" = [
+  ["state_icon", { "token" = "$herdr_brand_icon", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "✳", "fg" = "#d97757" }, { "equals" = "✦", "fg" = "#55aaff" }, { "equals" = "☤", "fg" = "#ffcc66" }, { "equals" = "ƒx", "fg" = "#55ffff" }, { "equals" = "≈", "fg" = "#5555ff" }, { "equals" = "N", "fg" = "#55ffff" }] }, { "token" = "agent", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "codex", "hide" = true }] }, { "token" = "state_text", "fg" = "#bbbbbb", "rules" = [{ "equals" = "blocked", "ignore_case" = true, "fg" = "#ff5555", "bold" = true }, { "equals" = "working", "ignore_case" = true, "fg" = "#ffff55", "bold" = true }, { "equals" = "done", "ignore_case" = true, "fg" = "#55ffff" }, { "equals" = "idle", "ignore_case" = true, "fg" = "#55ff55" }] }],
+  [{ "token" = "$mode", "fg" = "#bbbb00", "bold" = true }, { "token" = "$phase", "fg" = "#bbbbbb" }],
+  [{ "token" = "$usage", "fg" = "#ffff55", "bold" = true, "dim" = false }],
+  [{ "token" = "machine", "fg" = "#55ffff", "bold" = true, "rules" = [{ "equals" = "Local", "fg" = "#bbbbbb", "bold" = false }] }, { "token" = "workspace", "fg" = "#ff55ff" }, { "token" = "tab", "fg" = "#bbbbbb" }, { "token" = "pane", "fg" = "#bbbbbb", "dim" = false }],
+]
+"gemini" = [
+  ["state_icon", { "token" = "$herdr_brand_icon", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "✳", "fg" = "#d97757" }, { "equals" = "✦", "fg" = "#55aaff" }, { "equals" = "☤", "fg" = "#ffcc66" }, { "equals" = "ƒx", "fg" = "#55ffff" }, { "equals" = "≈", "fg" = "#5555ff" }, { "equals" = "N", "fg" = "#55ffff" }] }, { "token" = "agent", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "gemini", "hide" = true }] }, { "token" = "state_text", "fg" = "#bbbbbb", "rules" = [{ "equals" = "blocked", "ignore_case" = true, "fg" = "#ff5555", "bold" = true }, { "equals" = "working", "ignore_case" = true, "fg" = "#ffff55", "bold" = true }, { "equals" = "done", "ignore_case" = true, "fg" = "#55ffff" }, { "equals" = "idle", "ignore_case" = true, "fg" = "#55ff55" }] }],
+  [{ "token" = "$mode", "fg" = "#bbbb00", "bold" = true }, { "token" = "$phase", "fg" = "#bbbbbb" }],
+  [{ "token" = "$usage", "fg" = "#ffff55", "bold" = true, "dim" = false }],
+  [{ "token" = "machine", "fg" = "#55ffff", "bold" = true, "rules" = [{ "equals" = "Local", "fg" = "#bbbbbb", "bold" = false }] }, { "token" = "workspace", "fg" = "#ff55ff" }, { "token" = "tab", "fg" = "#bbbbbb" }, { "token" = "pane", "fg" = "#bbbbbb", "dim" = false }],
+]
+"hermes" = [
+  ["state_icon", { "token" = "$herdr_brand_icon", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "✳", "fg" = "#d97757" }, { "equals" = "✦", "fg" = "#55aaff" }, { "equals" = "☤", "fg" = "#ffcc66" }, { "equals" = "ƒx", "fg" = "#55ffff" }, { "equals" = "≈", "fg" = "#5555ff" }, { "equals" = "N", "fg" = "#55ffff" }] }, { "token" = "agent", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "hermes", "hide" = true }] }, { "token" = "state_text", "fg" = "#bbbbbb", "rules" = [{ "equals" = "blocked", "ignore_case" = true, "fg" = "#ff5555", "bold" = true }, { "equals" = "working", "ignore_case" = true, "fg" = "#ffff55", "bold" = true }, { "equals" = "done", "ignore_case" = true, "fg" = "#55ffff" }, { "equals" = "idle", "ignore_case" = true, "fg" = "#55ff55" }] }],
+  [{ "token" = "$mode", "fg" = "#bbbb00", "bold" = true }, { "token" = "$phase", "fg" = "#bbbbbb" }],
+  [{ "token" = "$usage", "fg" = "#ffff55", "bold" = true, "dim" = false }],
+  [{ "token" = "machine", "fg" = "#55ffff", "bold" = true, "rules" = [{ "equals" = "Local", "fg" = "#bbbbbb", "bold" = false }] }, { "token" = "workspace", "fg" = "#ff55ff" }, { "token" = "tab", "fg" = "#bbbbbb" }, { "token" = "pane", "fg" = "#bbbbbb", "dim" = false }],
+]
+"opencode" = [
+  ["state_icon", { "token" = "$herdr_brand_icon", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "✳", "fg" = "#d97757" }, { "equals" = "✦", "fg" = "#55aaff" }, { "equals" = "☤", "fg" = "#ffcc66" }, { "equals" = "ƒx", "fg" = "#55ffff" }, { "equals" = "≈", "fg" = "#5555ff" }, { "equals" = "N", "fg" = "#55ffff" }] }, { "token" = "agent", "fg" = "#ffffff", "bold" = true, "rules" = [{ "equals" = "opencode", "hide" = true }] }, { "token" = "state_text", "fg" = "#bbbbbb", "rules" = [{ "equals" = "blocked", "ignore_case" = true, "fg" = "#ff5555", "bold" = true }, { "equals" = "working", "ignore_case" = true, "fg" = "#ffff55", "bold" = true }, { "equals" = "done", "ignore_case" = true, "fg" = "#55ffff" }, { "equals" = "idle", "ignore_case" = true, "fg" = "#55ff55" }] }],
+  [{ "token" = "$mode", "fg" = "#bbbb00", "bold" = true }, { "token" = "$phase", "fg" = "#bbbbbb" }],
+  [{ "token" = "$usage", "fg" = "#ffff55", "bold" = true, "dim" = false }],
+  [{ "token" = "machine", "fg" = "#55ffff", "bold" = true, "rules" = [{ "equals" = "Local", "fg" = "#bbbbbb", "bold" = false }] }, { "token" = "workspace", "fg" = "#ff55ff" }, { "token" = "tab", "fg" = "#bbbbbb" }, { "token" = "pane", "fg" = "#bbbbbb", "dim" = false }],
+]
+
+[ui.sidebar.spaces]
+row_gap = 0
+rows = [
+  ["state_icon", { token = "workspace", fg = "#ffffff", bold = true }, "state_text"],
+  [{ token = "branch", fg = "#ff55ff" }, "git_status"],
+]
+
+[ui.toast]
+delivery = "herdr"
+delay_seconds = 2
+
+[ui.toast.herdr]
+position = "bottom-right"
+
+[ui.toast.clipboard]
+enabled = true
+position = "bottom-center"
+
+[ui.sound]
+enabled = false
+
+[session]
+resume_agents_on_restore = true
+
+[update]
+channel = "stable"

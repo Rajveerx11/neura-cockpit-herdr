@@ -1,0 +1,17 @@
+NEURA COCKPIT
+Copyright 2026 Rajveer Vadnal
+
+This configuration bundle is licensed under the Apache License, Version 2.0.
+
+Neura
+Copyright 2026 Rajveer Vadnal
+This product is licensed under the Apache License, Version 2.0.
+
+The usage reporter is reproduced from Neura's integrations/herdr-usage.
+The Codex detection manifest and optional Windows clipboard patch derive from
+Herdr 0.9.3 and its cached detection manifest, under Apache-2.0.
+The local Codex override adds startup hook-review dialog detection.
+The optional clipboard patch changes Windows text clipboard reading and shortcut
+routing; it is not applied by the installer and is not an upstream release.
+Harness names and their text-mode marks identify their respective products and
+do not imply endorsement. No terminal executable or vendor dependency is bundled.

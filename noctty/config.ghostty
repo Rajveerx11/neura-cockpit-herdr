@@ -1,0 +1,34 @@
+keybind = enter=text:\r
+keybind = ctrl+enter=text:\r
+
+# Subtle transparency; native Windows blur is not supported.
+background-opacity = 0.90
+window-padding-x = 12
+window-padding-y = 12
+
+# Neura Cockpit — text paste is handled by the outer terminal, including SSH/WSL.
+# Alt+V is intentionally text paste; Ctrl+Shift+V remains the stock fallback.
+keybind = ctrl+v=paste_from_clipboard
+keybind = alt+v=paste_from_clipboard
+
+# Same Ubuntu-style canvas and ANSI palette as Herdr's terminal theme.
+background = #1b1715
+foreground = #ffffff
+selection-background = #4a3b34
+selection-foreground = #ffffff
+palette = 0=#000000
+palette = 1=#bb0000
+palette = 2=#00bb00
+palette = 3=#bbbb00
+palette = 4=#0000bb
+palette = 5=#bb00bb
+palette = 6=#00bbbb
+palette = 7=#bbbbbb
+palette = 8=#555555
+palette = 9=#ff5555
+palette = 10=#55ff55
+palette = 11=#ffff55
+palette = 12=#5555ff
+palette = 13=#ff55ff
+palette = 14=#55ffff
+palette = 15=#ffffff

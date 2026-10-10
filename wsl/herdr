@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${HERDR_ENV:-}" != 1 || -z "${HERDR_BIN_PATH:-}" ]]; then
+  printf 'The Windows Herdr bridge is only available inside a Herdr pane.\n' >&2
+  exit 1
+fi
+# A Windows server cannot use an untranslated WSL --cwd (it silently falls back
+# to the Windows home directory). Translate only Herdr's own cwd option; never
+# reinterpret native agent arguments after --.
+args=()
+while (($#)); do
+  case "$1" in
+    --)
+      args+=("$@")
+      break
+      ;;
+    --cwd)
+      if (($# < 2)) || [[ -z "$2" || "$2" == --* ]]; then
+        printf 'Missing value for --cwd.\n' >&2
+        exit 2
+      fi
+      value="$2"
+      if [[ "$value" != [A-Za-z]:* && "$value" != \\\\* ]]; then
+        [[ "$value" == /* ]] || value="$PWD/$value"
+        value="$(wslpath -w "$value")"
+      fi
+      args+=("--cwd" "$value")
+      shift 2
+      ;;
+    --cwd=*)
+      value="${1#--cwd=}"
+      if [[ -z "$value" ]]; then
+        printf 'Missing value for --cwd.\n' >&2
+        exit 2
+      fi
+      if [[ "$value" != [A-Za-z]:* && "$value" != \\\\* ]]; then
+        [[ "$value" == /* ]] || value="$PWD/$value"
+        value="$(wslpath -w "$value")"
+      fi
+      args+=("--cwd=$value")
+      shift
+      ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+exec "$(wslpath -u "$HERDR_BIN_PATH")" "${args[@]}"

@@ -1,0 +1,30 @@
+id = "neura.usage"
+name = "Neura Usage"
+version = "0.1.0"
+min_herdr_version = "0.9.0"
+platforms = ["linux", "macos", "windows"]
+description = "Read-only Claude Code, Codex, and Cursor CLI usage in the Herdr sidebar."
+
+[[actions]]
+id = "refresh"
+title = "Refresh AI usage"
+command = ["node", "usage-report.mjs", "--force"]
+
+# Startup makes the token available in every newly restored or created session.
+[[startup]]
+command = ["node", "usage-report.mjs"]
+
+[[events]]
+id = "usage-agent-detected"
+on = "pane.agent_detected"
+command = ["node", "usage-report.mjs"]
+
+[[events]]
+id = "usage-agent-status-changed"
+on = "pane.agent_status_changed"
+command = ["node", "usage-report.mjs"]
+
+[[events]]
+id = "usage-pane-focused"
+on = "pane.focused"
+command = ["node", "usage-report.mjs"]

@@ -1,0 +1,26 @@
+id = "neura.branding"
+name = "Harness logos"
+version = "0.2.0"
+min_herdr_version = "0.9.1"
+platforms = ["linux", "macos", "windows"]
+description = "Small inline harness marks beside native status; preserves identity and lifecycle."
+
+[[actions]]
+id = "refresh"
+title = "Refresh logos"
+command = ["node", "branding.mjs"]
+
+[[startup]]
+command = ["node", "branding.mjs"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["node", "branding.mjs"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["node", "branding.mjs"]
+
+[[events]]
+on = "pane.focused"
+command = ["node", "branding.mjs"]

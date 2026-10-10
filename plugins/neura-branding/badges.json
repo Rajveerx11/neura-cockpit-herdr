@@ -1,0 +1,11 @@
+{
+  "pi": true,
+  "claude": true,
+  "codex": true,
+  "gemini": true,
+  "hermes": true,
+  "opencode": true,
+  "fx": true,
+  "deepseek": true,
+  "neura": true
+}

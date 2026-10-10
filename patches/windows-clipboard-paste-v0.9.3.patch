@@ -1,0 +1,294 @@
+--- a/src/client/shell/input.rs
++++ b/src/client/shell/input.rs
+@@ -500,6 +500,47 @@
+         true
+     }
+ 
++    pub(super) fn handle_terminal_paste_shortcut_with(
++        &mut self,
++        key: &crate::input::TerminalKey,
++        outcome: &mut ClientShellInput,
++        read_clipboard_text: impl FnOnce() -> Option<String>,
++    ) -> bool {
++        // The clipboard belongs to the Windows client, even when the focused
++        // pane is hosted on Linux. Unix clients keep their native shell chords.
++        let paste_key = cfg!(windows)
++            && key.generated_text.as_deref().is_none_or(str::is_empty)
++            && matches!(key.code, KeyCode::Char('v' | 'V'))
++            && (key.modifiers.difference(KeyModifiers::SHIFT) == KeyModifiers::CONTROL
++                || key.modifiers == KeyModifiers::ALT);
++        if !paste_key
++            || self.mode != ClientShellMode::Terminal
++            || self.copy_or_terminal_mode() == ClientShellMode::Copy
++            || self.overlay.is_some()
++            || self.popup_pending
++            || self.popup_terminal_id.is_some()
++            || self.focused_pane_id().is_none()
++        {
++            return false;
++        }
++        if key.kind == KeyEventKind::Repeat {
++            // A consumed press is reprocessed by the input lease machinery.
++            // Holding the chord must not insert the clipboard more than once.
++            return true;
++        }
++        if key.kind != KeyEventKind::Press {
++            return false;
++        }
++        let Some(text) = read_clipboard_text().filter(|text| !text.is_empty()) else {
++            return false;
++        };
++        self.prepare_committed_text(&text, outcome);
++        // Keep whitespace and line breaks together; the pane's existing paste
++        // encoder honors its live bracketed-paste mode, including over SSH.
++        self.push_focused_pane_event(ClientPaneInputEvent::Paste(text), outcome);
++        true
++    }
++
+     fn route_key_press(
+         &mut self,
+         key: &crate::input::TerminalKey,
+@@ -572,6 +613,13 @@
+                 if self.config.keybinds.matches_prefix(key) {
+                     self.mode = ClientShellMode::Prefix;
+                     outcome.repaint = true;
++                    return None;
++                }
++                if self.handle_terminal_paste_shortcut_with(
++                    key,
++                    outcome,
++                    crate::platform::read_clipboard_text,
++                ) {
+                     return None;
+                 }
+                 self.focused_pane_id().map(ClientInputTarget::Pane)
+--- a/src/client/shell/tests/input.rs
++++ b/src/client/shell/tests/input.rs
+@@ -170,6 +170,130 @@
+         Some(ClientShellOverlay::Rename(ClientRenameOverlay { ref input, .. }))
+             if input.as_str() == "feature/pasted"
+     ));
++}
++
++#[cfg(windows)]
++#[test]
++fn terminal_clipboard_paste_preserves_multiline_text_as_one_event() {
++    for modifiers in [
++        KeyModifiers::CONTROL,
++        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
++        KeyModifiers::ALT,
++    ] {
++        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++        state.set_snapshot(Box::new(snapshot()));
++        let key = crate::input::TerminalKey::new(KeyCode::Char('v'), modifiers);
++        let text = "first line\r\n\r\n  indented\ttext — last line\n";
++        let mut outcome = ClientShellInput::default();
++        assert!(
++            state.handle_terminal_paste_shortcut_with(&key, &mut outcome, || { Some(text.into()) })
++        );
++        assert!(matches!(
++            outcome.requests.as_slice(),
++            [ClientMessage::ClientShellPaneInput { pane_id, events }]
++                if pane_id == "pane_1"
++                    && matches!(events.as_slice(), [ClientPaneInputEvent::Paste(value)] if value == text)
++        ));
++    }
++}
++
++#[cfg(windows)]
++#[test]
++fn terminal_clipboard_paste_does_not_read_clipboard_without_a_target() {
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    let key = crate::input::TerminalKey::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
++    let mut outcome = ClientShellInput::default();
++    assert!(
++        !state.handle_terminal_paste_shortcut_with(&key, &mut outcome, || {
++            panic!("no pane must not read the clipboard")
++        })
++    );
++    assert!(outcome.requests.is_empty());
++}
++
++#[cfg(windows)]
++#[test]
++fn terminal_clipboard_paste_keeps_modal_popup_and_prefix_input_isolated() {
++    for context in 0..4 {
++        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++        state.set_snapshot(Box::new(snapshot()));
++        match context {
++            0 => state.mode = ClientShellMode::Prefix,
++            1 => state.popup_pending = true,
++            2 => {
++                state.overlay = Some(ClientShellOverlay::Rename(ClientRenameOverlay {
++                    title: "rename pane",
++                    input: TextEditor::new("", false),
++                    target: ClientRenameTarget::Pane {
++                        pane_id: "pane_1".into(),
++                    },
++                }))
++            }
++            _ => state.mode = ClientShellMode::Copy,
++        }
++        let key = crate::input::TerminalKey::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
++        let mut outcome = ClientShellInput::default();
++        assert!(
++            !state.handle_terminal_paste_shortcut_with(&key, &mut outcome, || {
++                panic!("non-terminal input must not read clipboard text")
++            })
++        );
++        assert!(outcome.requests.is_empty());
++    }
++}
++
++#[cfg(windows)]
++#[test]
++fn terminal_clipboard_paste_missing_or_empty_text_preserves_key_passthrough() {
++    for text in [None, Some(String::new())] {
++        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++        state.set_snapshot(Box::new(snapshot()));
++        let key = crate::input::TerminalKey::new(KeyCode::Char('v'), KeyModifiers::CONTROL);
++        let mut outcome = ClientShellInput::default();
++        assert!(!state.handle_terminal_paste_shortcut_with(&key, &mut outcome, || text));
++        assert!(outcome.requests.is_empty());
++    }
++}
++
++#[cfg(windows)]
++#[test]
++fn terminal_clipboard_paste_ignores_altgr_and_generated_text() {
++    let keys = [
++        crate::input::TerminalKey::new(
++            KeyCode::Char('v'),
++            KeyModifiers::CONTROL | KeyModifiers::ALT,
++        ),
++        crate::input::TerminalKey::new(KeyCode::Char('v'), KeyModifiers::NONE),
++        crate::input::TerminalKey::new(KeyCode::Char('v'), KeyModifiers::CONTROL)
++            .with_generated_text(Some("v".into())),
++    ];
++    for key in keys {
++        let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++        state.set_snapshot(Box::new(snapshot()));
++        let mut outcome = ClientShellInput::default();
++        assert!(
++            !state.handle_terminal_paste_shortcut_with(&key, &mut outcome, || {
++                panic!("ordinary/AltGr text must not read the clipboard")
++            })
++        );
++        assert!(outcome.requests.is_empty());
++    }
++}
++
++#[cfg(windows)]
++#[test]
++fn terminal_clipboard_paste_does_not_duplicate_on_key_repeat() {
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    state.set_snapshot(Box::new(snapshot()));
++    let key = crate::input::TerminalKey::new(KeyCode::Char('v'), KeyModifiers::CONTROL)
++        .with_kind(crossterm::event::KeyEventKind::Repeat);
++    let mut outcome = ClientShellInput::default();
++    assert!(
++        state.handle_terminal_paste_shortcut_with(&key, &mut outcome, || {
++            panic!("holding paste must not repeatedly read/insert the clipboard")
++        })
++    );
++    assert!(outcome.requests.is_empty());
+ }
+ 
+ #[test]
+--- a/src/client/shell/tests/popup_focus_projection.rs
++++ b/src/client/shell/tests/popup_focus_projection.rs
+@@ -131,6 +131,9 @@
+     assert!(!state.modal_paste_target_active());
+ }
+ 
++// Unix keeps the raw terminal chord; Windows clipboard behavior is covered
++// with injected readers in input.rs, without depending on the host clipboard.
++#[cfg(not(windows))]
+ #[test]
+ fn non_overlay_ctrl_v_is_forwarded_to_the_focused_pane() {
+     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+--- a/src/platform/windows.rs
++++ b/src/platform/windows.rs
+@@ -2402,7 +2402,35 @@
+ }
+ 
+ pub fn read_clipboard_text() -> Option<String> {
++    const MAX_CLIPBOARD_TEXT_BYTES: usize = 1024 * 1024;
++
++    for attempt in 0..10 {
++        // Read-only access does not require a clipboard owner window.
++        if unsafe { OpenClipboard(null_mut()) } != 0 {
++            let _clipboard = ClipboardGuard;
++            let bytes = clipboard_global_bytes(CF_UNICODETEXT as u32, MAX_CLIPBOARD_TEXT_BYTES)?;
++            return clipboard_unicode_text(&bytes);
++        }
++        if attempt < 9 {
++            std::thread::sleep(Duration::from_millis(5));
++        }
++    }
+     None
++}
++
++fn clipboard_unicode_text(bytes: &[u8]) -> Option<String> {
++    if !bytes.len().is_multiple_of(size_of::<u16>()) {
++        return None;
++    }
++    let units: Vec<u16> = bytes
++        .chunks_exact(2)
++        .map(|unit| u16::from_le_bytes([unit[0], unit[1]]))
++        .collect();
++    // Never scan beyond GlobalSize or accept an unterminated clipboard buffer.
++    let end = units.iter().position(|&unit| unit == 0)?;
++    String::from_utf16(&units[..end])
++        .ok()
++        .filter(|text| !text.is_empty())
+ }
+ 
+ pub fn open_url(url: &str) -> std::io::Result<Option<std::process::Child>> {
+@@ -3036,6 +3064,46 @@
+     use windows_sys::Win32::System::Console::{
+         AllocConsole, FreeConsole, GetConsoleProcessList, GetConsoleWindow,
+     };
++
++    #[test]
++    fn windows_clipboard_text_preserves_unicode_and_whitespace() {
++        let text = "  one\r\n\r\n\tहैलो 🧑‍💻 ";
++        let bytes: Vec<u8> = text
++            .encode_utf16()
++            .chain(std::iter::once(0))
++            .flat_map(u16::to_le_bytes)
++            .collect();
++        assert_eq!(super::clipboard_unicode_text(&bytes), Some(text.to_owned()));
++    }
++
++    #[test]
++    fn windows_clipboard_text_ignores_allocation_padding_after_terminator() {
++        assert_eq!(
++            super::clipboard_unicode_text(&[65, 0, 0, 0, 0, 0xd8]),
++            Some("A".to_owned())
++        );
++    }
++
++    #[test]
++    fn windows_clipboard_text_rejects_unterminated_data() {
++        assert_eq!(super::clipboard_unicode_text(&[65, 0]), None);
++    }
++
++    #[test]
++    fn windows_clipboard_text_rejects_incomplete_utf16_units() {
++        assert_eq!(super::clipboard_unicode_text(&[65, 0, 0]), None);
++    }
++
++    #[test]
++    fn windows_clipboard_text_rejects_malformed_utf16() {
++        assert_eq!(super::clipboard_unicode_text(&[0, 0xd8, 0, 0]), None);
++    }
++
++    #[test]
++    fn windows_clipboard_text_rejects_empty_data() {
++        assert_eq!(super::clipboard_unicode_text(&[]), None);
++        assert_eq!(super::clipboard_unicode_text(&[0, 0]), None);
++    }
+ 
+     #[test]
+     fn windows_standard_plugin_runtime_paths_drop_only_disk_and_unc_verbatim_prefixes() {

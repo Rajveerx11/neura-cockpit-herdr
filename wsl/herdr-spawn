@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${HERDR_COCKPIT_TOOLS:?Set HERDR_COCKPIT_TOOLS to the WSL path of the installed Herdr tools directory}"
+exec node "$HERDR_COCKPIT_TOOLS/spawn-agent.mjs" "$@"
