@@ -36,6 +36,14 @@ cargo clippy --locked --bin herdr --tests -- -D warnings
 cargo build --locked --release --bin herdr
 ```
 
+The reference Noctty Ctrl+V binding is outer-terminal `paste_from_clipboard`. Do not rely on that action to forward an image-only clipboard. For an opt-in patched-Herdr window, route Ctrl+V to the client's own clipboard handler with a launch-only override; leave global Noctty settings and Alt+V unchanged:
+
+```powershell
+noctty.exe '--keybind=ctrl+v=text:\x16' -e powershell.exe -NoProfile -File 'BUNDLE\tools\start-patched-client.ps1' -ClientPath 'PATH\TO\REVIEWED\herdr.exe'
+```
+
+Installed `noctty.exe --help` documents per-launch configuration options; `+explain-config --keybind=text` documents Zig string literal syntax. The text escape sends Ctrl+V (byte `0x16`). `+show-config --keybind=...` is not a validator for these runtime flags: it reports `InvalidField`, even with exit 0. The new window and physical image flow still need testing. Use a harmless screenshot and check the fx image attachment without pressing Enter.
+
 The ignored WSL round-trip test generates its own PNG, checks identical bytes from WSL, then removes its fixture. It never accesses or replaces the clipboard. Other regressions cover image eligibility, missing panes, popup ownership, unrelated events in the same batch, spaces/quotes, and remote-policy preservation. The patch never presses Enter.
 
 Scope: local Windows client, reachable local surface, valid WSL pane, default WSL distribution. Native Windows and remote routing retain existing behavior. Multiple distributions, timeout fault injection, actual harness image attachment, Alt+V, and remote/Pi application paths are not established by these tests. Successful staged image files use existing 24-hour stale cleanup; failed translation removes its file. Translation has a three-second timeout.
