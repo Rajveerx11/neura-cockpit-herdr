@@ -1,6 +1,7 @@
 param(
     [string]$Destination = (Join-Path $env:APPDATA 'herdr'),
-    [switch]$StageOnly
+    [switch]$StageOnly,
+    [switch]$CompactRows
 )
 $ErrorActionPreference = 'Stop'
 if ($StageOnly -and -not $PSBoundParameters.ContainsKey('Destination')) {
@@ -16,7 +17,7 @@ if (-not $binary -or -not [IO.Path]::IsPathRooted($binary) -or -not (Test-Path -
     $binary = (Get-Command herdr.exe -CommandType Application -ErrorAction Stop).Path
 }
 $version = & $binary --version
-if ($LASTEXITCODE -ne 0 -or $version -notmatch '^herdr 0\.9\.3\b') { throw 'This profile is validated for Herdr 0.9.3; use StageOnly only with that version too.' }
+if ($LASTEXITCODE -ne 0 -or $version.Trim() -ne 'herdr 0.9.5') { throw 'This profile is validated for Herdr 0.9.5; use StageOnly only with that version too.' }
 if (-not $StageOnly) {
     if ($env:HERDR_ENV -ne '1') { throw 'Run installation inside Herdr, or use -StageOnly for an offline preview.' }
     $text = & $binary plugin list --json
@@ -33,6 +34,13 @@ if (-not (Test-Path -LiteralPath $leaf)) {
     $leaf = if ($command) { $command.Path } else { 'leaf.exe' }
 }
 $template = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'config.windows.toml'))
+if ($CompactRows) {
+    # Replace the whole agent layout, including per-agent four-row overrides.
+    $layouts = [regex]::Matches($template, '(?ms)^\[ui\.sidebar\.agents\]\r?\n.*?(?=^\[ui\.sidebar\.spaces\]\r?$)')
+    if ($layouts.Count -ne 1) { throw 'Expected one agent layout section; nothing installed.' }
+    $compact = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'config.compact-rows.toml'))
+    $template = $template.Replace($layouts[0].Value, $compact.TrimEnd() + "`n`n")
+}
 $config = $template.Replace('@HERDR_CONFIG_DIR@', $root.Replace('\','/')).Replace('@LEAF_EXE@', $leaf.Replace('\','/').Replace("'", "''"))
 # Validate offline before touching the destination or registry. Do not reload a live client.
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('cockpit-config-' + [guid]::NewGuid() + '.toml')
@@ -67,7 +75,7 @@ if (Test-Path -LiteralPath $targetConfig) { Copy-Item -LiteralPath $targetConfig
 [IO.File]::WriteAllText($targetConfig, $config, [Text.UTF8Encoding]::new($false))
 if (-not $StageOnly) {
     foreach ($plugin in @('neura-branding','neura-usage')) {
-        & $binary plugin link --enabled (Join-Path $root "local-plugins\$plugin")
+        & $binary plugin link (Join-Path $root "local-plugins\$plugin")
         if ($LASTEXITCODE -ne 0) { throw 'Plugin linking failed; files are staged and backed up. No success is reported. Inspect the registry before retrying.' }
     }
 }

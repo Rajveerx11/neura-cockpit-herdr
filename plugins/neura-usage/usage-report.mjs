@@ -146,6 +146,16 @@ export function renderUsage(usage) {
   return parts.length ? parts.join(" · ") : "usage unavailable";
 }
 
+export function usageDisplay(cached, now) {
+  const age = now - cached?.fetchedAt;
+  if (!Number.isFinite(age) || age < 0) return "limits unavailable";
+  const hasQuota = typeof cached?.token === "string" && cached.token !== "usage unavailable" && cached.token.length > 0;
+  if (!hasQuota && !cached?.stale) return "limits unavailable";
+  const elapsed = age < 60_000 ? `${Math.floor(age / 1000)}s ago` : `${Math.floor(age / 60_000)}m ago`;
+  if (cached.stale || age >= TTL_MS) return `limits stale · ${elapsed}`;
+  return `fresh${age >= 1000 ? ` ${elapsed}` : ""} · ${cached.token}`;
+}
+
 function loadCache() { return readJson(CACHE_PATH) || { providers: {}, panes: [] }; }
 export function credentialRevision(file, stat = statSync) {
   try {
@@ -219,13 +229,21 @@ export async function runUsageReport({
     const revision = revisionFor(provider);
     const cached = cache.providers[provider];
     const age = clock() - cached?.fetchedAt;
-    if (!forceRefresh && revision && cached?.revision === revision && age >= 0 && age < TTL_MS) continue;
+    if (!forceRefresh && revision && cached?.revision === revision && cached.token && !cached.stale && age >= 0 && age < TTL_MS) continue;
+    for (const pane of providerPanes.filter((pane) => pane.provider === provider)) {
+      report(pane.pane_id, "limits refreshing", TTL_MS);
+    }
     try {
       const token = renderUsage(await fetch(provider, auth));
       cache.providers[provider] = { fetchedAt: clock(), revision, token };
     } catch {
-      // Failed or expired credentials must remove stale quota instead of republishing it.
-      delete cache.providers[provider];
+      // Keep only the last success time for this credential revision, never old quota or errors.
+      if (revision && cached?.revision === revision && Number.isFinite(cached.fetchedAt) && clock() >= cached.fetchedAt
+          && (cached.stale || (cached.token && cached.token !== "usage unavailable"))) {
+        cache.providers[provider] = { fetchedAt: cached.fetchedAt, revision, stale: true };
+      } else {
+        delete cache.providers[provider];
+      }
     }
   }
   const activePanes = providerPanes.map((pane) => pane.pane_id);
@@ -233,11 +251,9 @@ export async function runUsageReport({
   for (const pane of providerPanes) {
     const cached = cache.providers[pane.provider];
     const age = clock() - cached?.fetchedAt;
-    const fresh = age >= 0 && age < TTL_MS;
-    const token = fresh ? cached.token : undefined;
-    // A blank $usage hides why Codex limits are absent. Never substitute stale quota.
-    const display = pane.provider === "codex" && (!token || token === "usage unavailable") ? "limits unavailable" : token;
-    report(pane.pane_id, display, fresh ? TTL_MS - age : TTL_MS);
+    const fresh = !cached?.stale && age >= 0 && age < TTL_MS;
+    // Status/age is a snapshot at this event, not a live clock. Native TTL still expires it.
+    report(pane.pane_id, usageDisplay(cached, clock()), fresh ? TTL_MS - age : TTL_MS);
   }
   cache.panes = [...new Set([...activePanes, ...pendingClears])];
   writeCache(cache);

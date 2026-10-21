@@ -1,4 +1,4 @@
-# Neura Cockpit — global configuration validated on Herdr 0.9.3.
+# Neura Cockpit — global configuration validated on Herdr 0.9.5.
 # Keep this file on documented Herdr surfaces; validate with `herdr config check`.
 
 onboarding = false

@@ -33,9 +33,13 @@ jobs:
             $null = [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors)
             if ($errors.Count) { throw ($errors | Out-String) }
           }
-      - name: Windows PowerShell rename regressions
+      - name: Windows PowerShell helper and installer regressions
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           powershell.exe -NoProfile -File tests/rename-context.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -File tests/cockpit-attention.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -File tests/install-link.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

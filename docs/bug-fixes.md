@@ -1,6 +1,8 @@
-# Bug-first fixes
+# Historical bug-source fixes
 
-No enhancement is implemented by this batch. Existing controls and filesystem staging are reused; no new daemon, runtime dependency, protocol, or automatic binary installer is added.
+This page records the earlier Herdr 0.9.3 and fx v0.0.13 patch batch. The current profile targets Herdr 0.9.5. None of these versioned binary patches was ported or activated during [the 0.9.5 rollout](herdr-095-rollout.md). Their historical test results do not establish current runtime behavior.
+
+The earlier batch reused existing controls and filesystem staging. It added no daemon or runtime dependency, and no protocol or automatic binary installer.
 
 | Bug | Correction | Activation boundary |
 | --- | --- | --- |

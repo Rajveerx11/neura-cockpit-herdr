@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { clearStalePanes, credentialRevision, credentialsFor, normalizeClaude, normalizeCodex, normalizeCursor, providerForPane, renderUsage, runUsageReport, trustedHerdrBinary, usageMetadataArgs } from "./usage-report.mjs";
+import { clearStalePanes, credentialRevision, credentialsFor, normalizeClaude, normalizeCodex, normalizeCursor, providerForPane, renderUsage, runUsageReport, trustedHerdrBinary, usageDisplay, usageMetadataArgs } from "./usage-report.mjs";
 
 test("usage cache invalidates on credential-file changes without storing token data", () => {
   const first = credentialRevision("synthetic.json", () => ({ mtimeMs: 1, ctimeMs: 2, size: 3, ino: 4 }));
@@ -122,7 +122,8 @@ test("Codex reports real limits once per provider and never stores account crede
   await runUsageReport(s.options);
   assert.deepEqual(s.calls, ["codex", "save"]);
   assert.deepEqual(s.reports, [
-    ["w1:p1", "5h 80% · Wk 25%", 120_000], ["w1:p2", "5h 80% · Wk 25%", 120_000],
+    ["w1:p1", "limits refreshing", 120_000], ["w1:p2", "limits refreshing", 120_000],
+    ["w1:p1", "fresh · 5h 80% · Wk 25%", 120_000], ["w1:p2", "fresh · 5h 80% · Wk 25%", 120_000],
   ]);
   assert.doesNotMatch(JSON.stringify(s.cache), /synthetic-access|accountId|access_token/);
 });
@@ -132,7 +133,8 @@ test("cache hits keep the original expiry; exact TTL, account revision and force
   await runUsageReport(s.options);
   s.advance(30_000);
   await runUsageReport(s.options);
-  assert.deepEqual(s.reports.at(-1), ["w1:p1", "5h 80% · Wk 25%", 90_000]);
+  assert.deepEqual(s.reports.at(-1), ["w1:p1", "fresh 30s ago · 5h 80% · Wk 25%", 90_000]);
+  assert.equal(s.reports.filter(([, display]) => display === "limits refreshing").length, 1);
   assert.equal(s.calls.filter((c) => c === "codex").length, 1);
   s.advance(90_000);
   await runUsageReport(s.options);
@@ -141,24 +143,35 @@ test("cache hits keep the original expiry; exact TTL, account revision and force
   assert.equal(s.calls.filter((c) => c === "codex").length, 4);
 });
 
-test("missing/API-key credentials and failed fetches explicitly replace stale Codex limits", async () => {
-  for (const overrides of [
-    { credentials: () => undefined },
-    { fetch: async () => { throw new Error("synthetic failure"); } },
-  ]) {
-    const s = scenario(overrides);
-    s.cache.providers.codex = { fetchedAt: 1_699_999_800_000, revision: "revision-1", token: "5h 99%" };
-    await runUsageReport(s.options);
-    assert.deepEqual(s.reports, [["w1:p1", "limits unavailable", 120_000]]);
-    assert.equal(s.cache.providers.codex, undefined);
-    if (overrides.credentials) assert.deepEqual(s.calls, ["save"]);
-  }
+test("missing/API-key credentials discard quota and do not request a refresh", async () => {
+  const s = scenario({ credentials: () => undefined });
+  s.cache.providers.codex = { fetchedAt: 1_699_999_800_000, revision: "revision-1", token: "5h 99%" };
+  await runUsageReport(s.options);
+  assert.deepEqual(s.reports, [["w1:p1", "limits unavailable", 120_000]]);
+  assert.equal(s.cache.providers.codex, undefined);
+  assert.deepEqual(s.calls, ["save"]);
+});
+
+test("failed refresh retains only the last success age and never republishes stale quota", async () => {
+  const s = scenario({ fetch: async () => { throw new Error("synthetic private error"); } });
+  s.cache.providers.codex = { fetchedAt: 1_699_999_800_000, revision: "revision-1", token: "5h 99%" };
+  await runUsageReport(s.options);
+  assert.deepEqual(s.reports, [["w1:p1", "limits refreshing", 120_000], ["w1:p1", "limits stale · 3m ago", 120_000]]);
+  assert.deepEqual(s.cache.providers.codex, { fetchedAt: 1_699_999_800_000, revision: "revision-1", stale: true });
+  assert.doesNotMatch(JSON.stringify(s.cache), /99%|synthetic|private/);
+  s.advance(60_000);
+  await runUsageReport(s.options);
+  assert.equal(s.reports.at(-1)[1], "limits stale · 4m ago");
+  // A stale marker must not become a cache hit; a subsequent success replaces it.
+  await runUsageReport({ ...s.options, fetch: async () => normalizeCodex({ rate_limit: { primary_window: { used_percent: 50 } } }) });
+  assert.equal(s.reports.at(-1)[1], "fresh · Primary 50%");
+  assert.equal(s.cache.providers.codex.stale, undefined);
 });
 
 test("successful Codex response without rate limits stays explicitly unavailable", async () => {
   const s = scenario({ fetch: async () => normalizeCodex({}) });
   await runUsageReport(s.options);
-  assert.deepEqual(s.reports, [["w1:p1", "limits unavailable", 120_000]]);
+  assert.deepEqual(s.reports, [["w1:p1", "limits refreshing", 120_000], ["w1:p1", "limits unavailable", 120_000]]);
 });
 
 test("no running Codex means no auth read, network fetch or stale fallback on unrelated panes", async () => {
@@ -181,5 +194,64 @@ test("a cached quota expiring during another provider fetch is not republished",
   s.cache.providers.codex = { fetchedAt: 1_699_999_900_000, revision: "revision-1", token: "5h 99%" };
   s.options.fetch = async () => { s.advance(20_000); return normalizeClaude({ five_hour: { utilization: 50 } }); };
   await runUsageReport(s.options);
-  assert.deepEqual(s.reports, [["w1:p1", "limits unavailable", 120_000], ["w1:p2", "5h 50%", 120_000]]);
+  assert.deepEqual(s.reports, [
+    ["w1:p2", "limits refreshing", 120_000],
+    ["w1:p1", "limits stale · 2m ago", 120_000], ["w1:p2", "fresh · 5h 50%", 120_000],
+  ]);
+});
+
+test("freshness snapshots handle exact expiry, absent data and future timestamps", () => {
+  const cached = { fetchedAt: 1000, token: "5h 0%" };
+  assert.equal(usageDisplay(cached, 1000), "fresh · 5h 0%");
+  assert.equal(usageDisplay(cached, 2000), "fresh 1s ago · 5h 0%");
+  assert.equal(usageDisplay(cached, 120_999), "fresh 1m ago · 5h 0%");
+  assert.equal(usageDisplay(cached, 121_000), "limits stale · 2m ago");
+  for (const value of [undefined, {}, { fetchedAt: 1000 }, { fetchedAt: 1000, token: "usage unavailable" }]) {
+    assert.equal(usageDisplay(value, 1000), "limits unavailable");
+  }
+  assert.equal(usageDisplay(cached, 999), "limits unavailable");
+  assert.equal(usageDisplay({ fetchedAt: 1000, stale: true }, 31_000), "limits stale · 30s ago");
+});
+
+test("refreshing is published before waiting for the provider", async () => {
+  const s = scenario();
+  s.options.fetch = async () => {
+    assert.deepEqual(s.reports, [["w1:p1", "limits refreshing", 120_000]]);
+    return normalizeCodex({});
+  };
+  await runUsageReport(s.options);
+  assert.equal(s.reports.at(-1)[1], "limits unavailable");
+});
+
+test("failed refresh across account revisions or future timestamps cannot retain another quota's age", async () => {
+  for (const cached of [
+    { fetchedAt: 1_699_999_800_000, revision: "other-account", token: "5h 99%" },
+    { fetchedAt: 1_700_000_000_001, revision: "revision-1", token: "5h 99%" },
+    { fetchedAt: 1_699_999_800_000, revision: "revision-1", token: "usage unavailable" },
+  ]) {
+    const s = scenario({ fetch: async () => { throw new Error("synthetic"); } });
+    s.cache.providers.codex = cached;
+    await runUsageReport(s.options);
+    assert.equal(s.reports.at(-1)[1], "limits unavailable");
+    assert.equal(s.cache.providers.codex, undefined);
+  }
+});
+
+test("manual failure invalidates even still-fresh quota and unknown revision cannot retain it", async () => {
+  for (const revision of ["revision-1", undefined]) {
+    const s = scenario({ forceRefresh: true, revisionFor: () => revision, fetch: async () => { throw new Error("synthetic"); } });
+    s.cache.providers.codex = { fetchedAt: 1_699_999_970_000, revision: "revision-1", token: "5h 99%" };
+    await runUsageReport(s.options);
+    assert.equal(s.reports.at(-1)[1], revision ? "limits stale · 30s ago" : "limits unavailable");
+    assert.doesNotMatch(s.reports.at(-1)[1], /99%/);
+  }
+});
+
+test("all supported providers get unavailable instead of a silent empty token", async () => {
+  const s = scenario({
+    listPanes: () => ["claude", "cursor", "codex"].map((agent) => ({ pane_id: `w1:${agent}`, agent })),
+    credentials: () => undefined,
+  });
+  await runUsageReport(s.options);
+  assert.deepEqual(s.reports, ["claude", "cursor", "codex"].map((provider) => [`w1:${provider}`, "limits unavailable", 120_000]));
 });

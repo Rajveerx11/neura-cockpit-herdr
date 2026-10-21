@@ -30,8 +30,8 @@ function fixture(overrides = {}) {
       const custom = overrides.response?.(verb, argv, calls);
       if (custom) return custom;
       if (command === 'wslpath') return { status: 0, stdout: overrides.converted ?? `${parent.cwd}\n`, stderr: '' };
-      if (argv[0] === '--version') return { status: 0, stdout: overrides.version ?? 'herdr 0.9.3\n', stderr: '' };
-      if (argv[0] === 'status') return { status: 0, stdout: 'client:\n  version: 0.9.3\nserver:\n  version: 0.9.3\n  endpoint_compatible: yes\n  private_protocol_compatible: yes\n', stderr: '' };
+      if (argv[0] === '--version') return { status: 0, stdout: overrides.version ?? 'herdr 0.9.5\n', stderr: '' };
+      if (argv[0] === 'status') return { status: 0, stdout: overrides.status ?? 'client:\n  version: 0.9.5\nserver:\n  version: 0.9.5\n  endpoint_compatible: yes\n  private_protocol_compatible: yes\n', stderr: '' };
       if (verb === 'pane get') {
         if (argv[2] === parent.pane_id) {
           parentReads++;
@@ -137,7 +137,11 @@ for (const [label, overrides, extra, message] of [
   ['missing tab', { env: { HERDR_TAB_ID: '' } }, [], /HERDR_TAB_ID/],
   ['missing workspace', { env: { HERDR_WORKSPACE_ID: '' } }, [], /HERDR_WORKSPACE_ID/],
   ['wrong binary', { env: { HERDR_BIN_PATH: '/usr/bin/herdr' } }, [], /Windows Herdr binary/],
-  ['wrong version', { version: 'herdr 0.9.4' }, [], /Only Herdr 0.9.3/],
+  ['old version', { version: 'herdr 0.9.3' }, [], /Only Herdr 0.9.5/],
+  ['unverified version', { version: 'herdr 0.9.6' }, [], /Only Herdr 0.9.5/],
+  ['preview version', { version: 'herdr 0.9.5-preview' }, [], /Only Herdr 0.9.5/],
+  ['mixed server version', { status: 'client:\n  version: 0.9.5\nserver:\n  version: 0.9.3\n  endpoint_compatible: yes\n  private_protocol_compatible: yes\n' }, [], /running, compatible and version 0.9.5/],
+  ['preview server version', { status: 'client:\n  version: 0.9.5\nserver:\n  version: 0.9.5-preview\n  endpoint_compatible: yes\n  private_protocol_compatible: yes\n' }, [], /running, compatible and version 0.9.5/],
   ['moved parent', { parent: { ...parent, tab_id: 'wA7:tMoved' } }, [], /Injected parent context/],
   ['missing cwd', { parent: { ...parent, cwd: null } }, [], /Windows cwd/],
   ['raw WSL API cwd', { parent: { ...parent, cwd: '/mnt/c/project' } }, [], /Windows cwd/],

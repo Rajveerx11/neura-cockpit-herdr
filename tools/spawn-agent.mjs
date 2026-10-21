@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Item20: visible GLOBAL spawning, not an intrinsic fx subagent/config hook.
-// Contract: Herdr 0.9.3 installed CLI/skill and agent-automation documentation.
+// Contract: Herdr 0.9.5 installed CLI/skill and published v0.9.5 API schema.
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -42,7 +42,7 @@ export function parseArgs(argv) {
     }
   }
   if (options['--help']) return options;
-  requireThat(KINDS.includes(options['--kind']), `Unsupported kind: ${options['--kind'] ?? '(missing)'}. Herdr 0.9.3 agent start does not support fx; no raw pane-run fallback or fake readiness. Use --help for supported kinds.`);
+  requireThat(KINDS.includes(options['--kind']), `Unsupported kind: ${options['--kind'] ?? '(missing)'}. Herdr 0.9.5 agent start does not support fx; no raw pane-run fallback or fake readiness. Use --help for supported kinds.`);
   requireThat(/^[a-z][a-z0-9_-]{0,31}$/.test(options['--name'] ?? ''), 'Name must match [a-z][a-z0-9_-]{0,31}.');
   return options;
 }
@@ -102,10 +102,10 @@ export function spawnAgent(argv, { env = process.env, platform = process.platfor
   }
 
   // Fail closed on an unverified CLI/server contract, rather than silently upgrading.
-  requireThat(execute(binary, ['--version']).trim() === 'herdr 0.9.3', 'Only Herdr 0.9.3 is verified; inspect updated CLI/skill before adapting this helper.');
+  requireThat(execute(binary, ['--version']).trim() === 'herdr 0.9.5', 'Only Herdr 0.9.5 is verified; inspect updated CLI/skill before adapting this helper.');
   const status = execute(binary, ['status']);
-  requireThat((status.match(/version: 0\.9\.3\b/g) ?? []).length === 2
-    && /endpoint_compatible: yes\b/.test(status) && /private_protocol_compatible: yes\b/.test(status), 'Herdr server must be running, compatible and version 0.9.3.');
+  requireThat((status.match(/^[ \t]*version: 0\.9\.5[ \t]*\r?$/gm) ?? []).length === 2
+    && /endpoint_compatible: yes\b/.test(status) && /private_protocol_compatible: yes\b/.test(status), 'Herdr server must be running, compatible and version 0.9.5.');
   const parent = cli('pane', 'get', env.HERDR_PANE_ID).pane;
   requireThat(parent?.pane_id === env.HERDR_PANE_ID && parent.workspace_id === env.HERDR_WORKSPACE_ID
     && parent.tab_id === env.HERDR_TAB_ID, 'Injected parent context differs from API (possibly moved); refresh parent IDs before spawning.');
