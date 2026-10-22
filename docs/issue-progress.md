@@ -1,6 +1,6 @@
 # Open-issue work log
 
-All twelve GitHub issue bodies were checked before this batch. The implemented first batch is now deployed on the authorized reference installation using Herdr 0.9.5. This is not a claim that all twelve issues are fixed or closed.
+This log distinguishes the earlier first batch from the new helper rollout. The new helpers are installed on the authorized Windows reference machine. See the [rollout record](helper-rollout.md) for verification and backups. None of their GitHub issues was closed by this batch.
 
 See [the rollout record](herdr-095-rollout.md) for compatibility evidence and rollback. Private configuration and receipts are not published.
 
@@ -10,18 +10,18 @@ See [the rollout record](herdr-095-rollout.md) for compatibility evidence and ro
 | --- | --- | --- |
 | [#1 Compact rows](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/1) | Opt-in two-row layout deployed. Native 0.9.5 validation and reload passed. | Human comparison at minimum width with long/missing names, across hosts and focus states |
 | [#2 Attention queue](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/2) | Partial: read-only blocked/unknown inventory deployed. Explicit local-endpoint query succeeded. | Client-specific unseen completion and safe jumping remain unavailable |
-| [#3 Connection/build identity](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/3) | Triaged, not implemented | Establish displayed client and endpoint identity, not just a static label |
+| [#3 Connection/build identity](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/3) | Partial, installed: opt-in CLI fingerprint/build and explicit CLI endpoint evidence. Installed local-endpoint check passed. | Attached UI client/host identity is unavailable in the inspected 0.9.5 contract. See [identity boundaries](issue-3-identity.md). |
 | [#4 Focus mode](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/4) | Triaged, not implemented | Check native zoom/sidebar actions and restoration before adding an opt-in action |
 | [#5 Quota freshness](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/5) | Partial: event-time status code deployed. Native refresh action exited successfully. | Idle expiry still hides the badge until another event. No live agent exposed supported provider metadata for a real quota fetch. |
-| [#6 Workspace preset](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/6) | Triaged, not implemented | Extend existing spawn guards for one explicit preset. Retain ambiguous partial launches. |
+| [#6 Workspace preset](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/6) | Implemented and installed: one opt-in manager + reviewer preset reusing guarded spawning | Authorized live Windows/WSL launch, layout and focus confirmation remains pending. See [usage and rollback](workspace-preset.md). |
 | [#7 Remote launch/resume](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/7) | Triaged, not implemented | Verify saved-profile contracts and test an explicitly authorized target. No target has been chosen. |
-| [#8 Snippet composer](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/8) | Triaged, not implemented | Verify semantic paste and explicit confirmation without Enter |
-| [#9 Workspace notes](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/9) | Triaged, not implemented | Add explicit local project/note selection using Leaf. Do not discover or upload private notes. |
+| [#8 Snippet composer](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/8) | Blocked, not implemented | Native 0.9.5 input lacks the required fail-closed draft-paste and target/state guarantees. See [source evidence](issue-8-snippet-blocker.md). |
+| [#9 Workspace notes](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/9) | Implemented and installed: explicit local map/project/note selection with one-shot Leaf rendering. Installed synthetic-note check passed. | Human project/note workflow validation. No automatic workspace inference or note editing. See [notes helper](issue-9-workspace-notes.md). |
 | [#10 Health check](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/10) | Triaged, not implemented | Extend F4/launcher preflight after identity checks. No automatic repair. |
 | [#11 Stale blocked state](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/11) | Prior optional fx source patch published, not activated here | Safe activation and human end-to-end confirmation. Keep issue open. |
 | [#12 Screenshot paste](https://github.com/Rajveerx11/neura-cockpit-herdr/issues/12) | Prior optional 0.9.3 patch published, not ported or activated on 0.9.5 | Matching-version work and physical screenshot/harness confirmation. Keep issue open. |
 
-The next implementation group is connection identity and read-only health checks, followed by spawn helpers and local opt-in tools. Bug activation gates remain separate. See [historical bug fixes](bug-fixes.md) and [attention limitations](issue-2-attention.md).
+The current parallel batch added partial connection evidence, the preset, and explicit note selection. Snippet safety is blocked rather than worked around. The read-only health check remains pending. Bug activation gates remain separate. See [historical bug fixes](bug-fixes.md) and [attention limitations](issue-2-attention.md).
 
 ## Compact rows
 
@@ -41,7 +41,13 @@ Age describes the event, not a live clock. Native two-minute token expiry still 
 
 The live refresh action completed, but it had no eligible provider metadata to process. Provider account requests remain unverified. No metadata was invented to force them.
 
-## Checks and boundaries
+## New helper batch
+
+The manager integrated three isolated worker lanes, with #9 replacing the blocked #8 implementation. Independent review identified Unicode path-association and identity-response parsing/encoding defects. Those findings received targeted fixes and regression checks. The shared spawn helper now requires explicit boolean readiness rather than accepting an omitted false field. No helper retries or live prompts were added.
+
+The installer stages all helper dependencies. CI includes the new helper tests. Five helpers were installed with verified backups and matching source hashes. Configuration and plugin registrations were left unchanged. No server reload/restart, remote lifecycle or clipboard operation was performed. The combined local checks passed 184 Node tests and 74 mocked PowerShell cases. Native installer staging passed for default and compact layouts. The installed notes helper rendered a disposable generated note through Leaf, and the installed identity helper passed an explicit local-endpoint check. Independent feature review covered 20 changed files with zero skipped and no code blockers. Its stale-documentation findings were corrected. The private deployment code was independently reviewed and a concurrent-edit finding was fixed before live use. Consult each published commit's GitHub Actions checks for hosted results. LSP was attempted but the TypeScript language server is absent. Native agent layout and endpoint acceptance remain separate from mocked tests.
+
+## Earlier deployed-batch checks
 
 The updated bundle passed 100 Node cases and 58 mocked PowerShell cases. WSL bridge tests passed 13 cases. Native 0.9.5 validated both staged layouts. Two private rollout fixtures passed before activation, including a backup-junction refusal. Runtime checks verified deployed hashes and preserved pane context. See the rollout record for the full matrix.
 

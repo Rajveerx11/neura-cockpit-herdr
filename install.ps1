@@ -61,7 +61,7 @@ function Save-CockpitFile([string]$Source, [string]$Relative) {
     if (Test-Path -LiteralPath $target) { Copy-Item -LiteralPath $target -Destination ($target + '.before-' + $stamp) }
     Copy-Item -LiteralPath $Source -Destination $target
 }
-foreach ($name in @('rename-context.ps1','cockpit-status.ps1','spawn-agent.mjs')) {
+foreach ($name in @('rename-context.ps1','cockpit-status.ps1','cockpit-identity.ps1','spawn-agent.mjs','workspace-preset.mjs','workspace-notes.mjs')) {
     Save-CockpitFile (Join-Path $PSScriptRoot "tools\$name") "tools\$name"
 }
 Save-CockpitFile (Join-Path $PSScriptRoot 'agent-detection\codex.toml') 'agent-detection\codex.toml'

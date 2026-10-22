@@ -73,6 +73,16 @@ Avoid long simulated startup prompts: a real Codex launch has failed with `timed
 
 `fx` is not a supported Herdr `agent start` kind. In-process fx children cannot be converted into terminal panes by this configuration. For explicitly visible delegation, the manager must choose a supported real CLI worker instead. Different projects can legitimately share a workspace: do not change existing agents' directories merely to match its label.
 
+## Optional local helpers
+
+These helpers are now installed on the authorized Windows reference installation. The installer copies them beside the existing tools without adding bindings. Stage and review before updating another installation. See the [local rollout and rollback record](docs/helper-rollout.md).
+
+- [Manager + reviewer preset](docs/workspace-preset.md): keeps the existing manager and adds one right-hand reviewer in a single-pane tab. Start with `node .\tools\workspace-preset.mjs --kind codex --dry-run`. Normal mode creates a real pane and agent, so invoke it only when intended. No prompts are submitted. Readiness requires explicit native confirmation.
+- [Workspace-linked notes](docs/issue-9-workspace-notes.md): render one explicitly selected project note with Leaf using a manually maintained local JSON mapping. No discovery, note writes, or default shortcuts. Map/project/note paths must use their exact normalized spelling, including case.
+- [Connection/build evidence](docs/issue-3-identity.md): `tools/cockpit-status.ps1 -Identity -EndpointSocket '<absolute-api-socket>'` reports the trusted injected CLI's build/fingerprint and that explicit endpoint only. Displayed-client identity and provenance remain unknown. Default F4 is unchanged.
+
+The [snippet composer remains blocked](docs/issue-8-snippet-blocker.md): Herdr 0.9.5 does not expose the fail-closed draft-paste contract this feature needs. No paste workaround was added.
+
 ## WSL and Noctty
 
 `wsl/herdr` is a managed-session Windows bridge. It translates Herdr's own `--cwd` / `--cwd=...` arguments and leaves agent arguments after `--` untouched. Back up your existing wrapper before installing it at `~/.local/bin/herdr`; keep its executable permission. It requires the real Herdr-provided environment and is not a general out-of-session launcher.
@@ -98,15 +108,18 @@ Historical source patches for stale fx blocked state and screenshot paste are do
 ## Deterministic checks
 
 ```powershell
-node --test tests/spawn-agent.test.mjs tests/branding.test.mjs plugins/neura-usage/usage-report.test.mjs
+node --test tests/spawn-agent.test.mjs tests/workspace-preset.test.mjs tests/workspace-notes.test.mjs tests/branding.test.mjs plugins/neura-usage/usage-report.test.mjs
 powershell.exe -NoProfile -File tests/rename-context.tests.ps1
 powershell.exe -NoProfile -File tests/cockpit-attention.tests.ps1
+powershell.exe -NoProfile -File tests/cockpit-identity.tests.ps1
 powershell.exe -NoProfile -File tests/install-link.tests.ps1
 powershell.exe -NoProfile -File tests/install-stage.tests.ps1
 ```
 
 In WSL, run `python3 tests/wsl-cwd-bridge.test.py`; it requires `wslpath` and `/mnt/c`. The installer staging test requires an installed Herdr 0.9.5 and an existing live config, but never replaces that config or links plugins.
 
-The current bundle passed 100 Node cases, plus 58 mocked PowerShell cases and 13 WSL bridge cases. Native 0.9.5 staging passed for both layouts with backup and rollback checks. CI runs the Node suites on Windows/Linux and the mocked PowerShell suites on Windows. Hosted CI does not exercise deployment or real account requests. Clipboard and remote harness checks remain separate. [The rollout record](docs/herdr-095-rollout.md) lists live verification and its limits.
+The helper batch passed 184 Node tests and 74 mocked PowerShell cases before local installation. The installed identity helper passed an explicit local-endpoint check, and installed Leaf rendered a disposable generated note through the notes helper. Native default/compact installer staging also passed. See the [rollout record](docs/helper-rollout.md) for boundaries and backups. CI is configured for Node suites on Windows/Linux and mocked PowerShell suites on Windows; consult each published commit's checks for hosted results. LSP was unavailable because the TypeScript language server is absent.
+
+The earlier deployed batch passed 13 WSL bridge cases and native 0.9.5 staging for both layouts, including backup and rollback checks. Those historical checks do not verify the new preset's live behavior. Clipboard and remote harness checks remain separate. [The rollout record](docs/herdr-095-rollout.md) lists earlier live verification and its limits.
 
 Licensed under Apache-2.0; see `LICENSE` and `NOTICE`.

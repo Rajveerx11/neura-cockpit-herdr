@@ -39,6 +39,12 @@ Write-Output '{"error":{"code":"strict_mock_refusal"}}'
     $destination = Join-Path $root 'stage with spaces'
     $run = Run-Installer @('-Destination',$destination,'-CompactRows')
     Assert ($run.Code -eq 0) ('Installer failed: ' + $run.Text)
+    foreach ($helper in @('rename-context.ps1','cockpit-status.ps1','cockpit-identity.ps1','spawn-agent.mjs','workspace-preset.mjs','workspace-notes.mjs')) {
+        $source = Join-Path (Split-Path $PSScriptRoot -Parent) "tools\$helper"
+        $installed = Join-Path $destination "tools\$helper"
+        Assert (Test-Path -LiteralPath $installed -PathType Leaf) ("Missing staged helper: $helper")
+        Assert ((Get-FileHash -LiteralPath $source).Hash -ceq (Get-FileHash -LiteralPath $installed).Hash) ("Staged helper differs: $helper")
+    }
     $calls = @([IO.File]::ReadAllLines($env:COCKPIT_LINK_TEST_LOG) | ForEach-Object { ,($_ | ConvertFrom-Json) })
     $links = @($calls | Where-Object { $_[0] -eq 'plugin' -and $_[1] -eq 'link' })
     Assert ($links.Count -eq 2) 'Expected two native plugin links'

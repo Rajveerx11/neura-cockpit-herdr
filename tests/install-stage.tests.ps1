@@ -18,7 +18,9 @@ Assert (-not $errors.Count) 'Installer syntax errors'
 $null = Run-Installer @('-StageOnly','-Destination',$destination)
 $config = Join-Path $destination 'config.toml'
 Assert (Test-Path -LiteralPath $config) 'No staged configuration'
-Assert (Test-Path -LiteralPath (Join-Path $destination 'tools\cockpit-status.ps1')) 'No staged context panel'
+foreach ($helper in @('rename-context.ps1','cockpit-status.ps1','cockpit-identity.ps1','spawn-agent.mjs','workspace-preset.mjs','workspace-notes.mjs')) {
+    Assert (Test-Path -LiteralPath (Join-Path $destination "tools\$helper")) ("No staged helper: $helper")
+}
 Assert (Test-Path -LiteralPath (Join-Path $destination 'local-plugins\neura-usage\usage-report.mjs')) 'No staged usage plugin'
 Assert (Test-Path -LiteralPath (Join-Path $destination 'agent-detection\codex.toml')) 'No staged detector'
 Assert (-not ([IO.File]::ReadAllText($config) -match '@HERDR_CONFIG_DIR@|@LEAF_EXE@')) 'Unexpanded installation placeholders'

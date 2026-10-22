@@ -73,7 +73,7 @@ function rectOf(layout, id, parent) {
 
 // Inject spawn/read only for tests; no runtime mock mode or environment redirect.
 export function spawnAgent(argv, { env = process.env, platform = process.platform,
-  spawn = spawnSync, read = readFileSync, home = homedir() } = {}) {
+  spawn = spawnSync, read = readFileSync, home = homedir(), workspacePreset = false } = {}) {
   const options = parseArgs(argv);
   if (options['--help']) return { help: HELP };
   requireThat(env.HERDR_ENV === '1', 'Not inside Herdr (HERDR_ENV must be 1).');
@@ -127,6 +127,10 @@ export function spawnAgent(argv, { env = process.env, platform = process.platfor
   }
   const before = cli('pane', 'layout', '--pane', parent.pane_id).layout;
   const rect = rectOf(before, parent.pane_id, parent);
+  if (workspacePreset) {
+    requireThat(typeof parent.agent === 'string' && parent.agent.length > 0, 'Workspace preset requires an existing agent as manager; no manager is started or renamed.');
+    requireThat(before.panes.length === 1, 'Workspace preset requires a single-pane tab; existing panes are never rearranged or adopted.');
+  }
   requireThat(rect.width >= 121 && rect.height >= 12, `Right split too narrow/short (${rect.width}x${rect.height}); need at least 121x12 for two >=60-column panes. Widen it; no down fallback.`);
   const agents = cli('agent', 'list').agents;
   requireThat(Array.isArray(agents), 'Invalid live agent list.');
@@ -149,12 +153,14 @@ export function spawnAgent(argv, { env = process.env, platform = process.platfor
     const after = cli('pane', 'layout', '--pane', parent.pane_id).layout;
     const left = rectOf(after, parent.pane_id, parent);
     const right = rectOf(after, pane.pane_id, parent);
+    if (workspacePreset) requireThat(after.panes.length === 2, 'Workspace preset topology changed; expected only manager and reviewer panes.');
     requireThat(left.width >= 60 && right.width >= 60 && left.height >= 12 && right.height >= 12
       && right.x >= left.x + left.width && right.x <= left.x + left.width + 1
       && right.y === left.y && right.height === left.height
       && after.focused_pane_id === before.focused_pane_id, 'Post-split geometry/focus changed; refusing agent startup.');
     const liveParent = cli('pane', 'get', parent.pane_id).pane;
     requireThat(inContext(liveParent, parent) && liveParent.terminal_id === parent.terminal_id && sameCwd(cwdOf(liveParent), cwd), 'Parent moved or cwd changed before startup.');
+    if (workspacePreset) requireThat(liveParent.agent === parent.agent, 'Workspace preset manager agent changed before reviewer startup.');
     const live = cli('pane', 'get', pane.pane_id).pane;
     requireThat(inContext(live, parent) && live.terminal_id === pane.terminal_id && sameCwd(live.cwd, cwd)
       && live.focused === false && !live.agent, 'New pane changed/occupied before startup.');
@@ -163,7 +169,7 @@ export function spawnAgent(argv, { env = process.env, platform = process.platfor
     const agent = cli('agent', 'start', options['--name'], '--kind', options['--kind'], '--pane', pane.pane_id).agent;
     requireThat(agent?.pane_id === pane.pane_id && agent.terminal_id === pane.terminal_id
       && inContext(agent, parent) && agent.name === options['--name'] && agent.agent === options['--kind']
-      && ['idle', 'done'].includes(agent.agent_status) && agent.interactive_ready !== false
+      && ['idle', 'done'].includes(agent.agent_status) && agent.interactive_ready === true
       && agent.launch_pending !== true && sameCwd(cwdOf(agent), cwd), 'Startup response does not prove the expected agent is ready in the created pane.');
     // Use the validated unique name, not an arbitrary replacement occupant of the pane.
     if (prompt !== undefined) cli('agent', 'prompt', options['--name'], prompt);

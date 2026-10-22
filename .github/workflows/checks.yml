@@ -15,8 +15,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-      - name: Mocked spawning, branding and usage regressions
-        run: node --test tests/spawn-agent.test.mjs tests/branding.test.mjs plugins/neura-usage/usage-report.test.mjs
+      - name: Mocked spawning, presets, notes, branding and usage regressions
+        run: node --test tests/spawn-agent.test.mjs tests/workspace-preset.test.mjs tests/workspace-notes.test.mjs tests/branding.test.mjs plugins/neura-usage/usage-report.test.mjs
       - name: Parse optional patch verification helper
         if: runner.os == 'Linux'
         run: |
@@ -40,6 +40,8 @@ jobs:
           powershell.exe -NoProfile -File tests/rename-context.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell.exe -NoProfile -File tests/cockpit-attention.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell.exe -NoProfile -File tests/cockpit-identity.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell.exe -NoProfile -File tests/install-link.tests.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

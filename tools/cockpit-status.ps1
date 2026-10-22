@@ -1,6 +1,7 @@
-param([switch]$TestRender, [switch]$Attention, [string]$EndpointSocket)
+param([switch]$TestRender, [switch]$Attention, [switch]$Identity, [string]$EndpointSocket)
 # Reuse the existing tested CLI adapter; dot sourcing never opens its rename UI.
 . (Join-Path $PSScriptRoot 'rename-context.ps1')
+. (Join-Path $PSScriptRoot 'cockpit-identity.ps1')
 function Format-CockpitText($Value) {
     return [regex]::Replace([string]$Value, '[\x00-\x1f\x7f-\x9f]', ' ')
 }
@@ -87,8 +88,13 @@ function Show-CockpitAttention([string]$EndpointSocket, [switch]$TestRender) {
     }
 }
 
-function Show-CockpitStatus([switch]$TestRender, [switch]$Attention, [string]$EndpointSocket) {
+function Show-CockpitStatus([switch]$TestRender, [switch]$Attention, [switch]$Identity, [string]$EndpointSocket) {
     $ErrorActionPreference = 'Stop'
+    if ($Identity -and $Attention) { throw 'Choose either -Identity or -Attention. No query was made.' }
+    if ($Identity) {
+        Show-CockpitIdentity -EndpointSocket $EndpointSocket -TestRender:$TestRender
+        return
+    }
     if ($Attention) {
         Show-CockpitAttention -EndpointSocket $EndpointSocket -TestRender:$TestRender
         return
@@ -128,7 +134,7 @@ function Show-CockpitStatus([switch]$TestRender, [switch]$Attention, [string]$En
 # Import exposes helpers without reads, UI, exits, or preference changes.
 if ($MyInvocation.InvocationName -ne '.') {
     try {
-        Show-CockpitStatus -TestRender:$TestRender -Attention:$Attention -EndpointSocket $EndpointSocket
+        Show-CockpitStatus -TestRender:$TestRender -Attention:$Attention -Identity:$Identity -EndpointSocket $EndpointSocket
         exit 0
     } catch {
         Write-Host (Format-CockpitText $_.Exception.Message) -ForegroundColor Red

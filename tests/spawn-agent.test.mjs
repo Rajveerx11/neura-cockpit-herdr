@@ -88,6 +88,19 @@ test('real plan starts only the returned new pane without creating tabs/workspac
   ]);
 });
 
+for (const interactive_ready of [undefined, false, null, 'true', 1]) {
+  test(`startup requires explicit boolean readiness: ${interactive_ready}`, () => {
+    const f = fixture({ started: { ...child, name: 'reviewer', agent: 'pi', agent_status: 'idle', interactive_ready } });
+    assert.throws(() => f.run(['--prompt-file', 'x']), error => {
+      assert.match(error.message, /does not prove/);
+      assert.equal(error.cleanup, 'retained');
+      return true;
+    });
+    assert.equal(verbs(f).filter(v => v === 'agent start').length, 1);
+    assert.ok(!verbs(f).includes('agent prompt') && !verbs(f).includes('pane close'));
+  });
+}
+
 test('prompt-file preserves multiline Unicode/quotes/paths through agent prompt (CLI owns bracketing)', () => {
   const prompt = '--literal "quoted"\r\nReview C:\\A B\\file.ts; $x `not shell` Ω 😀\n';
   const f = fixture({ read: filename => { assert.equal(filename, '/local/prompt.md'); return Buffer.from(prompt); } });
