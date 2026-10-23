@@ -1,0 +1,5 @@
+# Opt-in Herdr 0.9.5 fragment. Merge into the existing [keys] table, not by concatenation.
+# See docs/native-focus.md. No composite mode, saved layout, or sidebar changes.
+[keys]
+zoom = ["prefix+z", "f6"]
+last_pane = "f7"
