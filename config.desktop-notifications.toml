@@ -1,0 +1,8 @@
+# Optional Herdr 0.9.5 fragment; merge only these two settings into existing tables.
+# Do not concatenate or replace config.toml. See docs/desktop-notifications.md.
+# Existing delay, clipboard toasts, per-agent sound settings and layouts stay yours.
+[ui.toast]
+delivery = "system"
+
+[ui.sound]
+enabled = false
