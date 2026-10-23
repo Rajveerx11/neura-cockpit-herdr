@@ -83,6 +83,16 @@ These helpers are now installed on the authorized Windows reference installation
 
 The [snippet composer remains blocked](docs/issue-8-snippet-blocker.md): Herdr 0.9.5 does not expose the fail-closed draft-paste contract this feature needs. No paste workaround was added.
 
+## Opt-in workflow improvements
+
+These additions are available in the checkout, not automatically installed or enabled:
+
+- [Attention-first view](docs/native-attention.md): native priority sorting and Goto filters.
+- [Integration health](docs/integration-maintenance.md): read-only freshness checks and a manual update guide.
+- [Worker launcher](docs/worker-launcher.md): a terminal-only frontend to guarded spawning; no unsafe popup fallback.
+- [Focus keys](docs/native-focus.md): optional F6 zoom and F7 previous-pane shortcuts.
+- [Desktop notifications](docs/desktop-notifications.md): optional Windows notifications with Herdr sounds off.
+
 ## WSL and Noctty
 
 `wsl/herdr` is a managed-session Windows bridge. It translates Herdr's own `--cwd` / `--cwd=...` arguments and leaves agent arguments after `--` untouched. Back up your existing wrapper before installing it at `~/.local/bin/herdr`; keep its executable permission. It requires the real Herdr-provided environment and is not a general out-of-session launcher.
