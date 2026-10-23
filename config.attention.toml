@@ -1,0 +1,4 @@
+# Optional Herdr 0.9.5 fragment. Merge this setting into the existing [ui] table.
+# Do not append a duplicate table or replace config.toml. See docs/native-attention.md.
+[ui]
+agent_panel_sort = "priority"
