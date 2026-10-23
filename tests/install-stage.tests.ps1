@@ -37,7 +37,8 @@ $agentLayout = [regex]::Match($compactText, '(?ms)^\[ui\.sidebar\.agents\]\r?\n(
 Assert ($agentLayout -ne '') 'No compact agent section'
 Assert (-not ($agentLayout -match 'rows_by_agent|\$mode|\$phase|\$usage')) 'Detailed rows still override compact rows'
 Assert (([regex]::Matches($agentLayout, '(?m)^  \[')).Count -eq 2) 'Compact layout must contain exactly two rows'
-foreach ($nativeToken in @('state_icon','state_text','agent','workspace','machine','$herdr_brand_icon')) {
+Assert (-not $agentLayout.Contains('$herdr_brand_icon')) 'Compact layout duplicates harness identity with a branding mark'
+foreach ($nativeToken in @('state_icon','state_text','agent','workspace','machine')) {
     Assert ($agentLayout.Contains('"' + $nativeToken + '"')) ("Missing compact token: $nativeToken")
 }
 foreach ($state in @('blocked','working','done','idle')) {

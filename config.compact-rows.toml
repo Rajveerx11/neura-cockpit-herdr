@@ -1,9 +1,10 @@
 # Optional Herdr 0.9.5 agent layout. Use install.ps1 -StageOnly -CompactRows.
 # Native rendering truncates long labels and omits absent tokens.
 # Put state before labels so long names cannot crowd out the state text.
+# Show the native agent name once; do not repeat it beside a branding mark.
 [ui.sidebar.agents]
 row_gap = 0
 rows = [
-  ["state_icon", { token = "state_text", fg = "#bbbbbb", rules = [{ equals = "blocked", ignore_case = true, fg = "#ff5555", bold = true }, { equals = "working", ignore_case = true, fg = "#ffff55", bold = true }, { equals = "done", ignore_case = true, fg = "#55ffff" }, { equals = "idle", ignore_case = true, fg = "#55ff55" }] }, { token = "$herdr_brand_icon", fg = "#ffffff", bold = true }, { token = "agent", fg = "#ffffff", bold = true }],
+  ["state_icon", { token = "state_text", fg = "#bbbbbb", rules = [{ equals = "blocked", ignore_case = true, fg = "#ff5555", bold = true }, { equals = "working", ignore_case = true, fg = "#ffff55", bold = true }, { equals = "done", ignore_case = true, fg = "#55ffff" }, { equals = "idle", ignore_case = true, fg = "#55ff55" }] }, { token = "agent", fg = "#ffffff", bold = true }],
   [{ token = "workspace", fg = "#ff55ff" }, { token = "machine", fg = "#55ffff", rules = [{ equals = "Local", fg = "#bbbbbb" }] }],
 ]

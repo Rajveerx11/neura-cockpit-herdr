@@ -1,6 +1,6 @@
 # NEURA COCKPIT
 
-A Windows-first Herdr 0.9.5 configuration for visible terminal agents: warm Linux-style colors, native state labels, small harness marks, real account limits, readable Markdown, and explicit working directories. WSL and Noctty support files are included separately.
+A Windows-first Herdr 0.9.5 configuration for visible terminal agents: warm Linux-style colors, native state labels, one agent name per entry, real account limits, readable Markdown, and explicit working directories. WSL and Noctty support files are included separately.
 
 This repository tracks the shareable configuration and setup, not a Herdr fork or binary release. It does not connect to your machines, sync private notes/calendars, change your existing agents' folders, or trust CLI hooks.
 
@@ -101,7 +101,7 @@ SSH machines must be configured using your own authorized target and authenticat
 
 ## Bug fixes before enhancements
 
-Codex now uses the distinct `>_` compact mark, not a Claude-like star. The plugin only updates branding tokens, never lifecycle state. The reference setup's live token was verified.
+Agent rows show the native name once, without a duplicate branding mark. Custom worker names and unknown harness labels keep the same native token. The branding plugin still offers marks for opt-in layouts (Codex uses `>_`), but never changes lifecycle state.
 
 Historical source patches for stale fx blocked state and screenshot paste are documented in [the bug-fix guide](docs/bug-fixes.md). Their tests belong to their stated source versions, not 0.9.5. The compact layout and updated helpers are now deployed on the authorized reference installation. See [the 0.9.5 rollout](docs/herdr-095-rollout.md) for runtime checks and rollback boundaries. The [issue work log](docs/issue-progress.md) distinguishes implemented work from partial or pending issues. Human visual and screenshot confirmation remain separate.
 
