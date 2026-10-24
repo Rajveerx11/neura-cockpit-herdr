@@ -15,6 +15,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Native agent tree patch packaging, scope and privacy
+        run: node --test tests/agent-tree.test.mjs
       - name: Mocked spawning, presets, notes, branding and usage regressions
         run: node --test tests/spawn-agent.test.mjs tests/workspace-preset.test.mjs tests/workspace-notes.test.mjs tests/branding.test.mjs tests/attention-profile.test.mjs tests/focus-keys.test.mjs tests/desktop-notifications.test.mjs plugins/neura-usage/usage-report.test.mjs
       - name: Parse optional patch verification helper

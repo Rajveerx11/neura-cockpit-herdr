@@ -1,0 +1,1600 @@
+diff --git a/src/client/shell.rs b/src/client/shell.rs
+--- a/src/client/shell.rs
++++ b/src/client/shell.rs
+@@ -2,6 +2,7 @@
+ 
+ mod actions;
+ mod agent_sidebar;
++mod agent_tree;
+ mod aggregate_navigation;
+ mod machine_diagnostics;
+ mod workspace_navigation;
+diff --git a/src/client/shell/actions.rs b/src/client/shell/actions.rs
+--- a/src/client/shell/actions.rs
++++ b/src/client/shell/actions.rs
+@@ -416,6 +416,10 @@
+                 kind,
+             },
+         );
++        let reveal = match &method {
++            crate::api::schema::Method::PaneFocus(target) => Some(target.pane_id.clone()),
++            _ => None,
++        };
+         outcome.actions.push(ClientShellAction::Endpoint {
+             endpoint_id: self.active_endpoint_id.clone(),
+             boot_id: snapshot.boot_id.clone(),
+@@ -424,6 +428,10 @@
+                 method,
+             }),
+         });
++        if let Some(pane_id) = reveal {
++            let endpoint_id = self.active_endpoint_id.clone();
++            self.reveal_tree_agent(&endpoint_id, &pane_id, self.hits.agent_body.height);
++        }
+         true
+     }
+ 
+diff --git a/src/client/shell/agent_sidebar.rs b/src/client/shell/agent_sidebar.rs
+--- a/src/client/shell/agent_sidebar.rs
++++ b/src/client/shell/agent_sidebar.rs
+@@ -54,7 +54,7 @@
+     area: Rect,
+     snapshot: &ClientShellSnapshot,
+     config: &ClientShellConfig,
+-    agent_scroll: &mut usize,
++    state: &mut render::ShellRenderState<'_>,
+     hits: &mut ShellHitMap,
+ ) {
+     if !render_agent_panel_header(
+@@ -67,6 +67,20 @@
+         return;
+     }
+ 
++    if super::agent_tree::enabled(
++        config,
++        state.endpoints,
++        snapshot.agent_view_label.as_deref(),
++    ) {
++        let rows = super::agent_tree::rows(
++            state.endpoints,
++            state.active_endpoint_id,
++            Some(snapshot),
++            state.collapsed_agent_tree,
++        );
++        super::agent_tree::render(buffer, area, &rows, config, state.agent_scroll, hits, false);
++        return;
++    }
+     let rows = agent_rows(snapshot, config, None);
+     render_agent_list(
+         buffer,
+@@ -77,7 +91,7 @@
+             .as_ref()
+             .map(|_| " no matching agents"),
+         config,
+-        agent_scroll,
++        state.agent_scroll,
+         hits,
+         |row| row.rows.len(),
+         |buffer, rect, row, hits| {
+diff --git a/src/client/shell/agent_tree.rs b/src/client/shell/agent_tree.rs
+new file mode 100644
+--- /dev/null
++++ b/src/client/shell/agent_tree.rs
+@@ -0,0 +1,496 @@
++//! Expanded grouped Agents presentation; never an input to global agent indices.
++use super::*;
++use crate::api::schema::AgentStatus;
++use ratatui::{
++    text::{Line, Span},
++    widgets::{Paragraph, Widget},
++};
++
++#[derive(Clone, Debug, PartialEq, Eq, Hash)]
++pub(super) enum Node {
++    Machine,
++    Workspace(String),
++    Tab {
++        workspace_id: String,
++        tab_id: String,
++    },
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Hash)]
++pub(super) struct Key {
++    pub(super) endpoint_id: ClientEndpointId,
++    pub(super) boot_id: String,
++    pub(super) node: Node,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(super) enum Target {
++    Unavailable,
++    Header(Key),
++    Agent {
++        endpoint_id: ClientEndpointId,
++        pane_id: String,
++    },
++}
++
++pub(super) struct Row {
++    pub(super) target: Target,
++    pub(super) label: String,
++    prefix: String,
++    status: Option<AgentStatus>,
++    state_label: Option<String>,
++    focused: bool,
++    stale: bool,
++    collapsed: bool,
++}
++
++pub(super) fn enabled(
++    config: &ClientShellConfig,
++    endpoints: &[ClientShellEndpoint],
++    agent_view_label: Option<&str>,
++) -> bool {
++    config.agent_panel_sort == crate::config::AgentPanelSortConfig::Spaces
++        && agent_view_label.is_none()
++        && endpoints.iter().all(|endpoint| {
++            endpoint
++                .snapshot
++                .as_deref()
++                .is_none_or(|snapshot| snapshot.agent_view_label.is_none())
++                && !matches!(
++                    ClientShellState::endpoint_agent_view(endpoint),
++                    Some(Ok(Some(_))) | Some(Err(()))
++                )
++        })
++}
++
++fn key(endpoint: &ClientEndpointId, snapshot: &ClientShellSnapshot, node: Node) -> Key {
++    Key {
++        endpoint_id: endpoint.clone(),
++        boot_id: snapshot.boot_id.clone(),
++        node,
++    }
++}
++
++fn header(
++    key: Key,
++    label: &str,
++    prefix: String,
++    focused: bool,
++    stale: bool,
++    collapsed: &HashSet<Key>,
++) -> Row {
++    let is_collapsed = collapsed.contains(&key);
++    Row {
++        target: Target::Header(key),
++        label: label.into(),
++        prefix,
++        status: None,
++        state_label: None,
++        focused,
++        stale,
++        collapsed: is_collapsed,
++    }
++}
++
++// All three consumers (draw, scrollbar, reveal) use this row-item projection.
++pub(super) fn rows(
++    endpoints: &[ClientShellEndpoint],
++    active_endpoint: &ClientEndpointId,
++    local_snapshot: Option<&ClientShellSnapshot>,
++    collapsed: &HashSet<Key>,
++) -> Vec<Row> {
++    let mut result = Vec::new();
++    let federated = endpoints.len() > 1;
++    for endpoint in endpoints {
++        let snapshot = if !federated && &endpoint.endpoint_id == active_endpoint {
++            local_snapshot.or(endpoint.snapshot.as_deref())
++        } else {
++            endpoint.snapshot.as_deref()
++        };
++        let Some(snapshot) = snapshot else {
++            result.push(Row {
++                target: Target::Unavailable,
++                label: format!("unavailable: {} (no metadata)", endpoint.label),
++                prefix: String::new(),
++                status: None,
++                state_label: None,
++                focused: false,
++                stale: true,
++                collapsed: false,
++            });
++            continue;
++        };
++        let stale = endpoint.status != ClientEndpointStatus::Online;
++        let active = &endpoint.endpoint_id == active_endpoint;
++        let panes: HashMap<_, _> = snapshot
++            .panes
++            .iter()
++            .map(|pane| (pane.pane_id.as_str(), pane))
++            .collect();
++        let tabs: HashMap<_, _> = snapshot
++            .tabs
++            .iter()
++            .map(|tab| (tab.tab_id.as_str(), tab))
++            .collect();
++        let workspaces: HashSet<_> = snapshot
++            .workspaces
++            .iter()
++            .map(|workspace| workspace.workspace_id.as_str())
++            .collect();
++        let mut agents_by_tab: HashMap<&str, Vec<&crate::protocol::ClientShellAgent>> =
++            HashMap::new();
++        let mut missing_membership = 0;
++        for agent in &snapshot.agents {
++            let tab = tabs.get(agent.tab_id.as_str());
++            // Pane metadata is optional in cached snapshots; only positive conflicts invalidate membership.
++            if panes.get(agent.pane_id.as_str()).is_some_and(|pane| {
++                pane.tab_id != agent.tab_id || pane.workspace_id != agent.workspace_id
++            }) || tab.is_some_and(|tab| tab.workspace_id != agent.workspace_id)
++            {
++                continue;
++            }
++            if tab.is_none() || !workspaces.contains(agent.workspace_id.as_str()) {
++                missing_membership += 1;
++                continue;
++            }
++            agents_by_tab.entry(&agent.tab_id).or_default().push(agent);
++        }
++        let mut tabs_by_workspace: HashMap<&str, Vec<&crate::protocol::ClientShellTab>> =
++            HashMap::new();
++        for tab in &snapshot.tabs {
++            if agents_by_tab.contains_key(tab.tab_id.as_str()) {
++                tabs_by_workspace
++                    .entry(&tab.workspace_id)
++                    .or_default()
++                    .push(tab);
++            }
++        }
++        if federated || stale {
++            let machine_key = key(&endpoint.endpoint_id, snapshot, Node::Machine);
++            let label = if endpoints
++                .iter()
++                .filter(|other| other.label == endpoint.label)
++                .count()
++                > 1
++            {
++                format!(
++                    "{} [{}]",
++                    endpoint.label,
++                    endpoint.endpoint_id.storage_key()
++                )
++            } else {
++                endpoint.label.clone()
++            };
++            result.push(header(
++                machine_key.clone(),
++                &label,
++                String::new(),
++                active,
++                stale,
++                collapsed,
++            ));
++            if collapsed.contains(&machine_key) {
++                continue;
++            }
++        }
++        if missing_membership > 0 {
++            result.push(Row {
++                target: Target::Unavailable,
++                label: format!(
++                    "unavailable: group metadata for {missing_membership} native agent(s)"
++                ),
++                prefix: String::new(),
++                status: None,
++                state_label: None,
++                focused: false,
++                stale: true,
++                collapsed: false,
++            });
++        }
++        for workspace in &snapshot.workspaces {
++            let Some(workspace_tabs) = tabs_by_workspace.get(workspace.workspace_id.as_str())
++            else {
++                continue;
++            };
++            let workspace_key = key(
++                &endpoint.endpoint_id,
++                snapshot,
++                Node::Workspace(workspace.workspace_id.clone()),
++            );
++            let focused =
++                active && snapshot.focused_workspace_id.as_deref() == Some(&workspace.workspace_id);
++            let base = if federated { "  " } else { "" };
++            result.push(header(
++                workspace_key.clone(),
++                &workspace.label,
++                base.into(),
++                focused,
++                stale,
++                collapsed,
++            ));
++            if collapsed.contains(&workspace_key) {
++                continue;
++            }
++            for (tab_index, tab) in workspace_tabs.iter().enumerate() {
++                let last_tab = tab_index + 1 == workspace_tabs.len();
++                let tab_key = key(
++                    &endpoint.endpoint_id,
++                    snapshot,
++                    Node::Tab {
++                        workspace_id: workspace.workspace_id.clone(),
++                        tab_id: tab.tab_id.clone(),
++                    },
++                );
++                result.push(header(
++                    tab_key.clone(),
++                    &tab.label,
++                    format!("{base}{}", if last_tab { "└─ " } else { "├─ " }),
++                    focused && snapshot.focused_tab_id.as_deref() == Some(&tab.tab_id),
++                    stale,
++                    collapsed,
++                ));
++                if collapsed.contains(&tab_key) {
++                    continue;
++                }
++                let Some(agents) = agents_by_tab.get(tab.tab_id.as_str()) else {
++                    continue;
++                };
++                for (index, agent) in agents.iter().enumerate() {
++                    let label = agent
++                        .name
++                        .as_deref()
++                        .filter(|label| !label.trim().is_empty())
++                        .or(agent.display_agent.as_deref())
++                        .or(agent.agent.as_deref())
++                        .or(agent.title.as_deref())
++                        .unwrap_or(&agent.pane_id);
++                    result.push(Row {
++                        target: Target::Agent {
++                            endpoint_id: endpoint.endpoint_id.clone(),
++                            pane_id: agent.pane_id.clone(),
++                        },
++                        label: label.into(),
++                        prefix: format!(
++                            "{base}{}{}",
++                            if last_tab { "   " } else { "│  " },
++                            if index + 1 == agents.len() {
++                                "└─ "
++                            } else {
++                                "├─ "
++                            }
++                        ),
++                        status: Some(agent.agent_status),
++                        state_label: agent
++                            .state_labels
++                            .iter()
++                            .find(|(state, _)| state == status_text(agent.agent_status))
++                            .map(|(_, label)| label.clone()),
++                        focused: active && agent.focused,
++                        stale,
++                        collapsed: false,
++                    });
++                }
++            }
++        }
++    }
++    result
++}
++
++pub(super) fn render(
++    buffer: &mut Buffer,
++    area: Rect,
++    rows: &[Row],
++    config: &ClientShellConfig,
++    agent_scroll: &mut usize,
++    hits: &mut ShellHitMap,
++    federated: bool,
++) {
++    super::agent_sidebar::render_agent_list(
++        buffer,
++        area,
++        rows,
++        Some(" no agents"),
++        config,
++        agent_scroll,
++        hits,
++        |_| 1,
++        |buffer, rect, row, hits| {
++            let palette = &config.palette;
++            let style = Style::default()
++                .fg(if row.stale {
++                    palette.overlay0
++                } else {
++                    palette.text
++                })
++                .bg(if row.focused {
++                    palette.active_row_bg
++                } else {
++                    palette.sidebar_bg
++                });
++            let marker = match row.status {
++                Some(status) => format!(
++                    "{} {} ",
++                    status_icon(status, config.status_indicators),
++                    row.state_label
++                        .as_deref()
++                        .unwrap_or_else(|| status_text(status))
++                ),
++                None if row.target == Target::Unavailable => "? ".into(),
++                None => format!(
++                    "{}{}",
++                    if row.collapsed { "▸ " } else { "▾ " },
++                    if row.stale { "stale " } else { "" }
++                ),
++            };
++            let marker_style = Style::default().fg(if row.stale {
++                palette.overlay0
++            } else {
++                row.status
++                    .map_or(palette.subtext0, |status| status_color(status, palette))
++            });
++            let prefix = if rect.width > 12 {
++                row.prefix.as_str()
++            } else {
++                ""
++            };
++            let label: String = row.label.chars().filter(|ch| !ch.is_control()).collect();
++            let marker: String = marker.chars().filter(|ch| !ch.is_control()).collect();
++            Paragraph::new(Line::from(vec![
++                Span::raw(prefix),
++                Span::styled(marker, marker_style),
++                Span::styled(
++                    label,
++                    if row.focused {
++                        style.add_modifier(Modifier::BOLD)
++                    } else {
++                        style
++                    },
++                ),
++                Span::raw(if row.stale && row.target != Target::Unavailable {
++                    " (stale)"
++                } else {
++                    ""
++                }),
++            ]))
++            .style(style)
++            .render(rect, buffer);
++            if !config.mouse_capture {
++                return;
++            }
++            match &row.target {
++                Target::Unavailable => {}
++                Target::Header(key) => hits.agent_tree_headers.push((rect, key.clone())),
++                Target::Agent {
++                    endpoint_id,
++                    pane_id,
++                } if federated => {
++                    hits.endpoint_agents
++                        .push((rect, endpoint_id.clone(), pane_id.clone()))
++                }
++                Target::Agent { pane_id, .. } => hits.agents.push((rect, pane_id.clone())),
++            }
++        },
++    );
++}
++
++impl ClientShellState {
++    pub(super) fn reveal_tree_agent(
++        &mut self,
++        endpoint_id: &ClientEndpointId,
++        pane_id: &str,
++        body_height: u16,
++    ) -> bool {
++        let label = self
++            .snapshot
++            .as_deref()
++            .and_then(|snapshot| snapshot.agent_view_label.as_deref());
++        if self.sidebar_collapsed || !enabled(&self.config, &self.endpoints, label) {
++            return false;
++        }
++        let Some(snapshot) = self
++            .endpoints
++            .iter()
++            .find(|endpoint| &endpoint.endpoint_id == endpoint_id)
++            .and_then(|endpoint| {
++                if self.endpoints.len() == 1 && endpoint_id == &self.active_endpoint_id {
++                    self.snapshot.as_deref().or(endpoint.snapshot.as_deref())
++                } else {
++                    endpoint.snapshot.as_deref()
++                }
++            })
++        else {
++            return true;
++        };
++        let Some(agent) = snapshot
++            .agents
++            .iter()
++            .find(|agent| agent.pane_id == pane_id)
++        else {
++            return true;
++        };
++        for node in [
++            Node::Machine,
++            Node::Workspace(agent.workspace_id.clone()),
++            Node::Tab {
++                workspace_id: agent.workspace_id.clone(),
++                tab_id: agent.tab_id.clone(),
++            },
++        ] {
++            self.collapsed_agent_tree
++                .remove(&key(endpoint_id, snapshot, node));
++        }
++        let rows = rows(
++            &self.endpoints,
++            &self.active_endpoint_id,
++            self.snapshot.as_deref(),
++            &self.collapsed_agent_tree,
++        );
++        let target = Target::Agent {
++            endpoint_id: endpoint_id.clone(),
++            pane_id: pane_id.into(),
++        };
++        if let Some(index) = rows.iter().position(|row| row.target == target) {
++            let heights = vec![1; rows.len()];
++            let mut gaps = vec![self.config.agents.row_gap; rows.len()];
++            if let Some(last) = gaps.last_mut() {
++                *last = 0;
++            }
++            self.agent_scroll = super::scroll::list_scroll_start_to_reveal(
++                &heights,
++                &gaps,
++                body_height,
++                self.agent_scroll,
++                index,
++            );
++        }
++        true
++    }
++
++    pub(super) fn toggle_agent_tree_at(&mut self, point: (u16, u16)) -> bool {
++        let Some(key) = self
++            .hits
++            .agent_tree_headers
++            .iter()
++            .find(|(rect, _)| super::contains(*rect, point))
++            .map(|(_, key)| key.clone())
++        else {
++            return false;
++        };
++        // Old hit rectangles must not collapse reused IDs after a server restart.
++        if !self.endpoints.iter().any(|endpoint| {
++            endpoint.endpoint_id == key.endpoint_id
++                && (if self.endpoints.len() == 1 && key.endpoint_id == self.active_endpoint_id {
++                    self.snapshot.as_deref().or(endpoint.snapshot.as_deref())
++                } else {
++                    endpoint.snapshot.as_deref()
++                })
++                .is_some_and(|snapshot| snapshot.boot_id == key.boot_id)
++        }) {
++            return true;
++        }
++        if !self.collapsed_agent_tree.remove(&key) {
++            self.collapsed_agent_tree.insert(key);
++        }
++        true
++    }
++}
+diff --git a/src/client/shell/composition.rs b/src/client/shell/composition.rs
+--- a/src/client/shell/composition.rs
++++ b/src/client/shell/composition.rs
+@@ -63,6 +63,7 @@
+             remote_collapsed_groups: &self.remote_collapsed_groups,
+             workspace_scroll: &mut self.workspace_scroll,
+             agent_scroll: &mut self.agent_scroll,
++            collapsed_agent_tree: &self.collapsed_agent_tree,
+             tab_scroll: &mut self.tab_scroll,
+             reveal_focused_workspace: &mut self.reveal_focused_workspace,
+             reveal_focused_tab: &mut self.reveal_focused_tab,
+@@ -219,6 +220,7 @@
+                 remote_collapsed_groups: &self.remote_collapsed_groups,
+                 workspace_scroll: &mut self.workspace_scroll,
+                 agent_scroll: &mut self.agent_scroll,
++                collapsed_agent_tree: &self.collapsed_agent_tree,
+                 tab_scroll: &mut self.tab_scroll,
+                 reveal_focused_workspace: &mut self.reveal_focused_workspace,
+                 reveal_focused_tab: &mut self.reveal_focused_tab,
+diff --git a/src/client/shell/endpoint_agents.rs b/src/client/shell/endpoint_agents.rs
+--- a/src/client/shell/endpoint_agents.rs
++++ b/src/client/shell/endpoint_agents.rs
+@@ -46,10 +46,8 @@
+     buffer: &mut Buffer,
+     area: Rect,
+     agent_view_label: Option<&str>,
+-    endpoints: &[ClientShellEndpoint],
+-    active_endpoint_id: &ClientEndpointId,
+     config: &ClientShellConfig,
+-    agent_scroll: &mut usize,
++    state: &mut render::ShellRenderState<'_>,
+     hits: &mut ShellHitMap,
+ ) {
+     if !super::agent_sidebar::render_agent_panel_header(
+@@ -61,14 +59,24 @@
+     ) {
+         return;
+     }
+-    let rows = agent_rows(endpoints, active_endpoint_id, config);
++    if super::agent_tree::enabled(config, state.endpoints, agent_view_label) {
++        let rows = super::agent_tree::rows(
++            state.endpoints,
++            state.active_endpoint_id,
++            None,
++            state.collapsed_agent_tree,
++        );
++        super::agent_tree::render(buffer, area, &rows, config, state.agent_scroll, hits, true);
++        return;
++    }
++    let rows = agent_rows(state.endpoints, state.active_endpoint_id, config);
+     super::agent_sidebar::render_agent_list(
+         buffer,
+         area,
+         &rows,
+         agent_view_label.map(|_| " no matching agents"),
+         config,
+-        agent_scroll,
++        state.agent_scroll,
+         hits,
+         |row| row.agent.rows.len(),
+         |buffer, rect, row, hits| {
+@@ -94,7 +102,7 @@
+         pane_id: &str,
+         body_height: u16,
+     ) {
+-        if body_height == 0 {
++        if self.reveal_tree_agent(endpoint_id, pane_id, body_height) || body_height == 0 {
+             return;
+         }
+         let rows = agent_rows(&self.endpoints, &self.active_endpoint_id, &self.config);
+diff --git a/src/client/shell/endpoint_navigation.rs b/src/client/shell/endpoint_navigation.rs
+--- a/src/client/shell/endpoint_navigation.rs
++++ b/src/client/shell/endpoint_navigation.rs
+@@ -297,6 +297,17 @@
+             };
+             self.push_endpoint_method(method, outcome);
+         } else {
++            if let ClientEndpointFocusTarget::Pane(pane_id) = &target {
++                let label = self
++                    .snapshot
++                    .as_deref()
++                    .and_then(|snapshot| snapshot.agent_view_label.as_deref());
++                if !self.sidebar_collapsed
++                    && super::agent_tree::enabled(&self.config, &self.endpoints, label)
++                {
++                    self.pending_agent_reveal = Some((endpoint_id.clone(), pane_id.clone()));
++                }
++            }
+             outcome.actions.push(ClientShellAction::ActivateEndpoint {
+                 endpoint_id,
+                 target: Some(target),
+diff --git a/src/client/shell/endpoint_sidebar.rs b/src/client/shell/endpoint_sidebar.rs
+--- a/src/client/shell/endpoint_sidebar.rs
++++ b/src/client/shell/endpoint_sidebar.rs
+@@ -557,10 +557,8 @@
+         buffer,
+         detail_area,
+         active_snapshot.and_then(|snapshot| snapshot.agent_view_label.as_deref()),
+-        state.endpoints,
+-        state.active_endpoint_id,
+         config,
+-        state.agent_scroll,
++        state,
+         hits,
+     );
+     hits.sidebar_toggle = Rect::new(
+diff --git a/src/client/shell/endpoints.rs b/src/client/shell/endpoints.rs
+--- a/src/client/shell/endpoints.rs
++++ b/src/client/shell/endpoints.rs
+@@ -571,6 +571,32 @@
+             .snapshot
+             .as_deref()
+             .is_some_and(|previous| previous.boot_id != snapshot.boot_id);
++        if !self.collapsed_agent_tree.is_empty() {
++            let tree_workspaces: HashSet<_> = snapshot
++                .workspaces
++                .iter()
++                .map(|workspace| workspace.workspace_id.as_str())
++                .collect();
++            let tree_tabs: HashSet<_> = snapshot
++                .tabs
++                .iter()
++                .map(|tab| (tab.workspace_id.as_str(), tab.tab_id.as_str()))
++                .collect();
++            self.collapsed_agent_tree.retain(|key| {
++                &key.endpoint_id != endpoint_id
++                    || (key.boot_id == snapshot.boot_id
++                        && match &key.node {
++                            super::agent_tree::Node::Machine => true,
++                            super::agent_tree::Node::Workspace(id) => {
++                                tree_workspaces.contains(id.as_str())
++                            }
++                            super::agent_tree::Node::Tab {
++                                workspace_id,
++                                tab_id,
++                            } => tree_tabs.contains(&(workspace_id.as_str(), tab_id.as_str())),
++                        })
++            });
++        }
+         if boot_changed {
+             self.retire_endpoint_notifications(endpoint_id);
+         }
+diff --git a/src/client/shell/mouse.rs b/src/client/shell/mouse.rs
+--- a/src/client/shell/mouse.rs
++++ b/src/client/shell/mouse.rs
+@@ -2038,6 +2038,10 @@
+                     outcome.repaint = true;
+                     return;
+                 }
++                if self.toggle_agent_tree_at(point) {
++                    outcome.repaint = true;
++                    return;
++                }
+                 if self.handle_endpoint_machine_click(point, outcome) {
+                     return;
+                 }
+diff --git a/src/client/shell/render.rs b/src/client/shell/render.rs
+--- a/src/client/shell/render.rs
++++ b/src/client/shell/render.rs
+@@ -238,6 +238,7 @@
+     pub(super) remote_collapsed_groups: &'a HashMap<ClientEndpointId, HashSet<String>>,
+     pub(super) workspace_scroll: &'a mut usize,
+     pub(super) agent_scroll: &'a mut usize,
++    pub(super) collapsed_agent_tree: &'a HashSet<super::agent_tree::Key>,
+     pub(super) tab_scroll: &'a mut usize,
+     pub(super) reveal_focused_workspace: &'a mut bool,
+     pub(super) reveal_focused_tab: &'a mut bool,
+diff --git a/src/client/shell/sidebar.rs b/src/client/shell/sidebar.rs
+--- a/src/client/shell/sidebar.rs
++++ b/src/client/shell/sidebar.rs
+@@ -430,14 +430,7 @@
+         }
+     }
+ 
+-    super::render_agent_panel(
+-        buffer,
+-        detail_area,
+-        snapshot,
+-        config,
+-        state.agent_scroll,
+-        hits,
+-    );
++    super::render_agent_panel(buffer, detail_area, snapshot, config, state, hits);
+ 
+     hits.sidebar_toggle = Rect::new(
+         area.right().saturating_sub(2),
+diff --git a/src/client/shell/state.rs b/src/client/shell/state.rs
+--- a/src/client/shell/state.rs
++++ b/src/client/shell/state.rs
+@@ -100,6 +100,7 @@
+     pub(super) agent_scroll_metrics: Option<crate::pane::ScrollMetrics>,
+     pub(super) agent_max_scroll: usize,
+     pub(super) agent_sort_toggle: Rect,
++    pub(super) agent_tree_headers: Vec<(Rect, super::agent_tree::Key)>,
+     pub(super) sidebar_divider: Rect,
+     pub(super) sidebar_section_divider: Rect,
+     pub(super) sidebar_toggle: Rect,
+@@ -884,6 +885,7 @@
+     pub(super) remote_collapsed_groups: HashMap<ClientEndpointId, HashSet<String>>,
+     pub(super) workspace_scroll: usize,
+     pub(super) agent_scroll: usize,
++    pub(super) collapsed_agent_tree: HashSet<super::agent_tree::Key>,
+     pub(super) pending_agent_reveal: Option<(ClientEndpointId, String)>,
+     pub(super) tab_scroll: usize,
+     pub(super) mobile_switcher_scroll: usize,
+@@ -1058,6 +1060,7 @@
+             remote_collapsed_groups,
+             workspace_scroll: 0,
+             agent_scroll: 0,
++            collapsed_agent_tree: HashSet::new(),
+             pending_agent_reveal: None,
+             tab_scroll: 0,
+             mobile_switcher_scroll: 0,
+diff --git a/src/client/shell/tests/agent_tree.rs b/src/client/shell/tests/agent_tree.rs
+new file mode 100644
+--- /dev/null
++++ b/src/client/shell/tests/agent_tree.rs
+@@ -0,0 +1,594 @@
++use super::*;
++use crate::client::shell::agent_tree::{self, Node, Target};
++
++fn tree_state(count: usize) -> ClientShellState {
++    let mut projected = snapshot();
++    projected.panes = (0..count)
++        .map(|index| ClientShellPane {
++            pane_id: format!("pane_{}", index + 1),
++            focused: index == 0,
++            ..projected.panes[0].clone()
++        })
++        .collect();
++    projected.agents = projected
++        .panes
++        .iter()
++        .enumerate()
++        .map(|(index, pane)| ClientShellAgent {
++            pane_id: pane.pane_id.clone(),
++            workspace_id: pane.workspace_id.clone(),
++            tab_id: pane.tab_id.clone(),
++            name: Some(format!("worker-{index}")),
++            display_agent: Some("harness fallback".into()),
++            agent: Some("codex".into()),
++            title: Some("title fallback".into()),
++            terminal_title: None,
++            terminal_title_stripped: None,
++            agent_status: AgentStatus::Blocked,
++            state_change_seq: 1,
++            state_labels: Vec::new(),
++            tokens: Vec::new(),
++            focused: pane.focused,
++        })
++        .collect();
++    let mut config = Config::default();
++    config.ui.sidebar.agents.row_gap = 0;
++    let mut state = ClientShellState::new(ClientShellConfig::from_config(&config));
++    state.set_snapshot(Box::new(projected));
++    state.set_pane_surface(surface());
++    state
++}
++
++fn tree_rows(state: &ClientShellState) -> Vec<agent_tree::Row> {
++    agent_tree::rows(
++        &state.endpoints,
++        &state.active_endpoint_id,
++        state.snapshot.as_deref(),
++        &state.collapsed_agent_tree,
++    )
++}
++
++fn leaf_count(state: &ClientShellState) -> usize {
++    tree_rows(state)
++        .iter()
++        .filter(|row| matches!(row.target, Target::Agent { .. }))
++        .count()
++}
++
++fn click(state: &mut ClientShellState, rect: Rect) -> ClientShellInput {
++    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
++        kind: MouseEventKind::Down(MouseButton::Left),
++        column: rect.x,
++        row: rect.y,
++        modifiers: KeyModifiers::NONE,
++    })])
++}
++
++fn frame_text(frame: &crate::client::frame_output::ComposedFrame) -> String {
++    frame
++        .cells
++        .iter()
++        .map(|cell| cell.symbol.as_str())
++        .collect()
++}
++
++#[test]
++fn tree_header_toggle_is_local_and_never_acknowledges_or_focuses() {
++    let mut state = tree_state(2);
++    state.compose(106, 30).unwrap();
++    let header = state.hits.agent_tree_headers[0].0;
++    let before: Vec<_> = state
++        .snapshot
++        .as_ref()
++        .unwrap()
++        .agents
++        .iter()
++        .map(|agent| agent.agent_status)
++        .collect();
++    let outcome = click(&mut state, header);
++    assert!(outcome.actions.is_empty() && outcome.repaint && !outcome.resize);
++    assert!(state.chrome_drag.is_none() && state.workspace_press.is_none());
++    assert_eq!(leaf_count(&state), 0);
++    state.compose(106, 30).unwrap();
++    assert!(state.hits.agents.is_empty());
++    assert_eq!(
++        state
++            .snapshot
++            .as_ref()
++            .unwrap()
++            .agents
++            .iter()
++            .map(|agent| agent.agent_status)
++            .collect::<Vec<_>>(),
++        before
++    );
++    let outcome = click(&mut state, header);
++    assert!(outcome.actions.is_empty());
++    assert_eq!(leaf_count(&state), 2);
++    state.compose(106, 30).unwrap();
++    let leaf = state.hits.agents[1].0;
++    let outcome = click(&mut state, leaf);
++    assert!(
++        matches!(&outcome.actions[..], [ClientShellAction::Endpoint { request, .. }]
++        if matches!(&request.method, crate::api::schema::Method::PaneFocus(target) if target.pane_id == "pane_2"))
++    );
++}
++
++#[test]
++fn tree_names_unknown_unicode_and_narrow_rows_are_native_and_single_line() {
++    let mut state = tree_state(1);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.agents[0].name = Some("审查 Δ worker".into());
++    projected.agents[0].agent = None;
++    projected.agents[0].agent_status = AgentStatus::Unknown;
++    state.set_snapshot(projected);
++    assert_eq!(tree_rows(&state).last().unwrap().label, "审查 Δ worker");
++    let frame = state.compose(106, 30).unwrap();
++    let text = frame_text(&frame);
++    assert!(text.contains("unknown"));
++    assert!(!text.contains("harness fallback") && !text.contains("title fallback"));
++    assert_eq!(state.hits.agents[0].0.height, 1);
++    let rows = tree_rows(&state);
++    for width in [0, 1, 4, 8, 12, 36] {
++        let mut buffer = Buffer::empty(Rect::new(0, 0, width, 9));
++        let mut hits = ShellHitMap::default();
++        agent_tree::render(
++            &mut buffer,
++            Rect::new(0, 0, width, 9),
++            &rows,
++            &state.config,
++            &mut 0,
++            &mut hits,
++            false,
++        );
++        for (rect, _) in &hits.agents {
++            assert!(rect.right() <= width && rect.height == 1);
++        }
++    }
++}
++
++#[test]
++fn tree_collapse_keys_survive_rename_reorder_but_not_boot_reuse() {
++    let mut state = tree_state(2);
++    state.compose(106, 30).unwrap();
++    let old_hit = state.hits.agent_tree_headers[1].clone();
++    let header = old_hit.0;
++    click(&mut state, header);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.tabs[0].label = "renamed".into();
++    projected.agents.reverse();
++    state.set_snapshot(projected.clone());
++    assert_eq!(leaf_count(&state), 0);
++    projected.boot_id = "next-boot".into();
++    state.set_snapshot(projected);
++    assert!(state.collapsed_agent_tree.is_empty());
++    assert_eq!(leaf_count(&state), 2);
++    assert!(
++        state.hits.agent_tree_headers.is_empty(),
++        "native reboot clears hit geometry"
++    );
++    state.hits.agent_tree_headers.push(old_hit);
++    assert!(state.toggle_agent_tree_at((header.x, header.y)));
++    assert!(
++        state.collapsed_agent_tree.is_empty(),
++        "old hit boot must be rejected"
++    );
++}
++
++#[test]
++fn tree_membership_keeps_optional_metadata_and_rejects_conflicts() {
++    let mut state = tree_state(3);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.panes.remove(0);
++    projected.agents[1].tab_id = "missing".into();
++    state.set_snapshot(projected.clone());
++    assert_eq!(
++        leaf_count(&state),
++        2,
++        "missing optional pane does not mean closed"
++    );
++    let mut tab = projected.tabs[0].clone();
++    tab.tab_id = "tab_2".into();
++    tab.label = "moved".into();
++    projected.tabs.push(tab);
++    projected.panes[1].tab_id = "tab_2".into();
++    projected.agents[2].tab_id = "tab_2".into();
++    state.set_snapshot(projected.clone());
++    assert!(tree_rows(&state).iter().any(|row| row.label == "moved"));
++    projected.agents.remove(0);
++    state.set_snapshot(projected.clone());
++    assert_eq!(
++        leaf_count(&state),
++        1,
++        "closed agents leave the native inventory"
++    );
++    projected.panes[1].workspace_id = "conflicting-workspace".into();
++    state.set_snapshot(projected.clone());
++    assert_eq!(
++        leaf_count(&state),
++        0,
++        "positive membership conflicts are rejected"
++    );
++    projected.tabs.clear();
++    state.set_snapshot(projected);
++    assert!(tree_rows(&state).is_empty(), "no empty ghost groups");
++}
++
++#[test]
++fn tree_missing_parent_metadata_is_unavailable_not_empty_success() {
++    let mut state = tree_state(1);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.panes.clear();
++    projected.tabs.clear();
++    state.set_snapshot(projected.clone());
++    for missing_workspace in [false, true] {
++        if missing_workspace {
++            projected.workspaces.clear();
++            state.set_snapshot(projected.clone());
++        }
++        let rows = tree_rows(&state);
++        assert_eq!(rows.len(), 1);
++        assert_eq!(rows[0].target, Target::Unavailable);
++        assert!(rows[0].label.contains("1 native agent(s)"));
++        let frame = state.compose(106, 30).unwrap();
++        let text = frame_text(&frame);
++        assert!(text.contains("unavailable") && !text.contains("no agents"));
++        assert!(state.hits.agents.is_empty() && state.hits.agent_tree_headers.is_empty());
++    }
++}
++
++#[test]
++fn tree_namespaced_collapses_keep_remote_colliding_ids_visible_and_stale() {
++    let mut state = tree_state(1);
++    let remote = SavedSshEndpoint::new("Local", "dev@example.invalid", "test").unwrap();
++    let remote_id = ClientEndpointId::Ssh(remote.id.clone());
++    state.set_endpoint_catalog(&[remote]);
++    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
++    state.set_endpoint_snapshot(&remote_id, state.snapshot.clone().unwrap());
++    state.compose(106, 40).unwrap();
++    let header = state
++        .hits
++        .agent_tree_headers
++        .iter()
++        .find(|(_, key)| key.endpoint_id.is_local() && matches!(key.node, Node::Workspace(_)))
++        .unwrap()
++        .0;
++    click(&mut state, header);
++    let rows = tree_rows(&state);
++    let leaves: Vec<_> = rows
++        .iter()
++        .filter_map(|row| match &row.target {
++            Target::Agent { endpoint_id, .. } => Some(endpoint_id),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(leaves, vec![&remote_id]);
++    assert!(rows.iter().any(|row| row.label == "Local [local]"));
++    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Reconnecting);
++    let frame = state.compose(106, 40).unwrap();
++    assert!(frame_text(&frame).contains("stale"));
++    let leaf = state
++        .hits
++        .endpoint_agents
++        .iter()
++        .find(|(_, endpoint, _)| endpoint == &remote_id)
++        .unwrap()
++        .0;
++    assert!(click(&mut state, leaf).actions.is_empty());
++}
++
++#[test]
++fn tree_scroll_collapse_and_explicit_navigation_use_same_visible_rows() {
++    let mut state = tree_state(20);
++    state.compose(106, 30).unwrap();
++    let rows = tree_rows(&state);
++    let heights = vec![1; rows.len()];
++    let gaps = vec![0; rows.len()];
++    let expected = scroll::list_scroll_metrics(&heights, &gaps, state.hits.agent_body.height, 0);
++    assert_eq!(state.hits.agent_max_scroll, expected.max_offset_from_bottom);
++    let body = state.hits.agent_body;
++    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
++        kind: MouseEventKind::ScrollDown,
++        column: body.x,
++        row: body.y,
++        modifiers: KeyModifiers::NONE,
++    })]);
++    assert_eq!(state.agent_scroll, 1);
++    state.compose(106, 30).unwrap();
++    let track = state.hits.agent_scrollbar;
++    click(&mut state, Rect::new(track.x, track.bottom() - 2, 1, 1));
++    assert!(state.agent_scroll > 1);
++    state.agent_scroll = 0;
++    state.chrome_drag = None;
++    state.compose(106, 30).unwrap();
++    let header = state.hits.agent_tree_headers[0].0;
++    click(&mut state, header);
++    state.agent_scroll = usize::MAX;
++    state.compose(106, 30).unwrap();
++    assert_eq!(state.agent_scroll, 0);
++    let mut outcome = ClientShellInput::default();
++    state.push_endpoint_method(
++        crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget {
++            pane_id: "pane_20".into(),
++        }),
++        &mut outcome,
++    );
++    state.compose(106, 30).unwrap();
++    assert!(state.hits.agents.iter().any(|(_, pane)| pane == "pane_20"));
++    assert!(state.collapsed_agent_tree.is_empty());
++}
++
++#[test]
++fn tree_collapse_does_not_change_goto_or_index_eligibility() {
++    let mut state = tree_state(3);
++    let before = aggregate_navigation::online_agent_targets(
++        &state.endpoints,
++        &state.active_endpoint_id,
++        state.config.agent_panel_sort,
++    )
++    .iter()
++    .map(|target| target.pane_id.clone())
++    .collect::<Vec<_>>();
++    state.compose(106, 30).unwrap();
++    let header = state.hits.agent_tree_headers[0].0;
++    click(&mut state, header);
++    let after = aggregate_navigation::online_agent_targets(
++        &state.endpoints,
++        &state.active_endpoint_id,
++        state.config.agent_panel_sort,
++    )
++    .iter()
++    .map(|target| target.pane_id.clone())
++    .collect::<Vec<_>>();
++    assert_eq!(before, after);
++    state.open_navigator_overlay();
++    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
++        panic!("navigator")
++    };
++    navigator.selected = Some(ClientNavigatorTarget::Pane {
++        endpoint_id: ClientEndpointId::Local,
++        pane_id: "pane_3".into(),
++    });
++    let mut outcome = ClientShellInput::default();
++    state.accept_navigator_selection(&mut outcome);
++    assert!(!outcome.actions.is_empty());
++    assert_eq!(leaf_count(&state), 3);
++}
++
++#[test]
++fn tree_preserves_priority_custom_compact_mobile_and_mouse_disabled_surfaces() {
++    let mut state = tree_state(1);
++    state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
++    state.compose(106, 30).unwrap();
++    assert!(state.hits.agent_tree_headers.is_empty());
++    assert!(!state.hits.agents.is_empty());
++    state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Spaces;
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.agent_view_label = Some("custom".into());
++    projected.agent_order = vec!["pane_1".into()];
++    state.set_snapshot(projected);
++    state.compose(106, 30).unwrap();
++    assert!(state.hits.agent_tree_headers.is_empty());
++    state = tree_state(1);
++    state.sidebar_collapsed = true;
++    state.compose(106, 30).unwrap();
++    assert!(state.hits.agent_tree_headers.is_empty());
++    state.sidebar_collapsed = false;
++    state.config.mouse_capture = false;
++    state.compose(106, 30).unwrap();
++    assert!(state.hits.agent_tree_headers.is_empty() && state.hits.agents.is_empty());
++    state.config.mouse_capture = true;
++    state.compose(30, 20).unwrap();
++    assert!(state.hits.agent_tree_headers.is_empty());
++}
++
++#[test]
++fn tree_unavailable_composition_does_not_lose_native_groups() {
++    let mut state = tree_state(1);
++    state.pane_surface = None;
++    state.compose(106, 30).unwrap();
++    assert!(!state.hits.agent_tree_headers.is_empty());
++    let header = state.hits.agent_tree_headers[0].0;
++    assert!(click(&mut state, header).actions.is_empty());
++}
++
++#[test]
++fn tree_missing_metadata_is_unavailable_not_an_empty_success() {
++    let mut state = tree_state(0);
++    state.snapshot = None;
++    state.endpoints[0].snapshot = None;
++    state.pane_surface = None;
++    let rows = tree_rows(&state);
++    assert_eq!(rows.len(), 1);
++    assert_eq!(rows[0].target, Target::Unavailable);
++    let text = frame_text(&state.compose(106, 30).unwrap());
++    assert!(text.contains("unavailable"));
++    assert!(!text.contains("no agents"));
++    assert!(state.hits.agents.is_empty() && state.hits.agent_tree_headers.is_empty());
++    let mut projected = snapshot();
++    projected.agents.clear();
++    state.set_snapshot(Box::new(projected));
++    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Reconnecting);
++    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("stale"));
++}
++
++#[test]
++fn tree_custom_state_labels_and_all_control_characters_are_handled() {
++    let mut state = tree_state(1);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.agents[0].name = Some("a\u{0}\u{7}\u{1b}\u{7f}\u{85}\nb".into());
++    projected.agents[0].state_labels = vec![("blocked".into(), "ask\u{7} me".into())];
++    projected.workspaces[0].label = "workspace\u{1b}".into();
++    projected.tabs[0].label = "tab\u{85}".into();
++    state.set_snapshot(projected);
++    let frame = state.compose(106, 30).unwrap();
++    let body = state.hits.agent_body;
++    let buffer = frame.to_ratatui_buffer().unwrap();
++    let mut text = String::new();
++    for y in body.y..body.bottom() {
++        for x in body.x..body.right() {
++            text.push_str(buffer[(x, y)].symbol());
++        }
++    }
++    assert!(text.contains("ask me") && text.contains("ab"));
++    assert!(!text.chars().any(char::is_control));
++    assert_eq!(
++        state.snapshot.as_ref().unwrap().agents[0].agent_status,
++        AgentStatus::Blocked
++    );
++}
++
++#[test]
++fn tree_local_snapshot_fallback_is_shared_by_render_toggle_and_reveal() {
++    let mut state = tree_state(2);
++    state.endpoints[0].snapshot = None;
++    state.compose(106, 30).unwrap();
++    let header = state.hits.agent_tree_headers[0].0;
++    assert!(click(&mut state, header).actions.is_empty());
++    assert_eq!(leaf_count(&state), 0);
++    assert!(state.reveal_tree_agent(&ClientEndpointId::Local, "pane_2", 10));
++    assert_eq!(leaf_count(&state), 2);
++}
++
++#[test]
++fn tree_disconnected_cached_agent_survives_absent_optional_pane_metadata() {
++    let mut state = tree_state(1);
++    let remote = SavedSshEndpoint::new("Remote", "dev@example.invalid", "test").unwrap();
++    let remote_id = ClientEndpointId::Ssh(remote.id.clone());
++    state.set_endpoint_catalog(&[remote]);
++    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.boot_id = "remote-boot".into();
++    // Native agent membership survives absent auxiliary pane metadata, as in agent_row.
++    projected.panes.clear();
++    state.set_endpoint_snapshot(&remote_id, projected);
++    assert!(state.activate_endpoint_projection(&remote_id));
++    let mut remote_surface = surface();
++    remote_surface.boot_id = "remote-boot".into();
++    state.set_pane_surface(remote_surface);
++    state.mark_endpoint_disconnected(&remote_id);
++    let frame = state.compose(106, 40).unwrap();
++    let text = frame_text(&frame);
++    assert!(text.contains("LIVE") && text.contains("stale") && text.contains("reconnecting"));
++    assert!(frame.cursor.is_none() && state.hits.panes.is_empty());
++    let rect = state
++        .hits
++        .endpoint_agents
++        .iter()
++        .find(|(_, endpoint, pane)| endpoint == &remote_id && pane == "pane_1")
++        .unwrap()
++        .0;
++    let buffer = frame.to_ratatui_buffer().unwrap();
++    assert_eq!(buffer[(rect.x, rect.y)].fg, state.config.palette.overlay0);
++    assert!(click(&mut state, rect).actions.is_empty());
++    assert!(tree_rows(&state).iter().any(|row| row.target
++        == Target::Agent {
++            endpoint_id: remote_id.clone(),
++            pane_id: "pane_1".into()
++        }));
++}
++
++#[test]
++#[ignore = "manual fixed-geometry client tree scaling profile"]
++fn agent_tree_render_scale_profile() {
++    for count in [1, 15] {
++        let mut state = tree_state(count);
++        for _ in 0..20 {
++            std::hint::black_box(state.compose(106, 30).unwrap());
++        }
++        let start = std::time::Instant::now();
++        for _ in 0..1000 {
++            std::hint::black_box(state.compose(106, 30).unwrap());
++        }
++        eprintln!(
++            "agent-tree {count} panes 106x30: {:.1} us/frame",
++            start.elapsed().as_secs_f64() * 1000.0
++        );
++    }
++}
++
++#[test]
++fn tree_remote_goto_defers_hidden_ancestor_reveal_until_activation() {
++    let mut state = tree_state(2);
++    let remote = SavedSshEndpoint::new("Remote", "dev@example.invalid", "test").unwrap();
++    let remote_id = ClientEndpointId::Ssh(remote.id.clone());
++    state.set_endpoint_catalog(&[remote]);
++    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.boot_id = "remote-boot".into();
++    state.set_endpoint_snapshot(&remote_id, projected);
++    state.compose(106, 40).unwrap();
++    let header = state
++        .hits
++        .agent_tree_headers
++        .iter()
++        .find(|(_, key)| key.endpoint_id == remote_id && key.node == Node::Machine)
++        .unwrap()
++        .0;
++    click(&mut state, header);
++    state.open_navigator_overlay();
++    let Some(ClientShellOverlay::Navigator(navigator)) = state.overlay.as_mut() else {
++        panic!("navigator")
++    };
++    navigator.selected = Some(ClientNavigatorTarget::Pane {
++        endpoint_id: remote_id.clone(),
++        pane_id: "pane_2".into(),
++    });
++    let mut outcome = ClientShellInput::default();
++    state.accept_navigator_selection(&mut outcome);
++    assert_eq!(
++        state.pending_agent_reveal,
++        Some((remote_id.clone(), "pane_2".into()))
++    );
++    assert!(!state.collapsed_agent_tree.is_empty());
++    assert!(state.activate_endpoint_projection(&remote_id));
++    assert!(state.collapsed_agent_tree.is_empty());
++    let mut next_surface = surface();
++    next_surface.boot_id = "remote-boot".into();
++    state.set_pane_surface(next_surface);
++    state.compose(106, 40).unwrap();
++    assert!(state
++        .hits
++        .endpoint_agents
++        .iter()
++        .any(|(_, endpoint, pane)| endpoint == &remote_id && pane == "pane_2"));
++}
++
++#[test]
++fn tree_collapsing_bottom_tab_clamps_scroll_and_keeps_focused_lineage() {
++    let mut state = tree_state(20);
++    let mut projected = state.snapshot.clone().unwrap();
++    let mut second_tab = projected.tabs[0].clone();
++    second_tab.tab_id = "tab_2".into();
++    second_tab.label = "second".into();
++    second_tab.focused = false;
++    projected.tabs.push(second_tab);
++    for index in 18..20 {
++        projected.panes[index].tab_id = "tab_2".into();
++        projected.agents[index].tab_id = "tab_2".into();
++    }
++    state.set_snapshot(projected);
++    let frame = state.compose(106, 30).unwrap();
++    let buffer = frame.to_ratatui_buffer().unwrap();
++    for (rect, _) in &state.hits.agent_tree_headers {
++        assert_eq!(
++            buffer[(rect.x, rect.y)].bg,
++            state.config.palette.active_row_bg
++        );
++    }
++    state.agent_scroll = usize::MAX;
++    state.compose(106, 30).unwrap();
++    let old_max = state.hits.agent_max_scroll;
++    let header = state
++        .hits
++        .agent_tree_headers
++        .iter()
++        .find(|(_, key)| matches!(&key.node, Node::Tab { tab_id, .. } if tab_id == "tab_2"))
++        .unwrap()
++        .0;
++    assert!(click(&mut state, header).actions.is_empty());
++    state.compose(106, 30).unwrap();
++    assert!(state.hits.agent_max_scroll < old_max);
++    assert_eq!(state.agent_scroll, state.hits.agent_max_scroll);
++    assert_eq!(leaf_count(&state), 18);
++}
+diff --git a/src/client/shell/tests/agents_worktrees_notifications.rs b/src/client/shell/tests/agents_worktrees_notifications.rs
+--- a/src/client/shell/tests/agents_worktrees_notifications.rs
++++ b/src/client/shell/tests/agents_worktrees_notifications.rs
+@@ -813,6 +813,8 @@
+         focused: true,
+     }];
+     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
++    // Configured token rows remain the flat priority/custom-view presentation.
++    state.config.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+     state.set_snapshot(Box::new(projected));
+     state.set_pane_surface(surface());
+     let frame = state.compose(106, 30).expect("agent sidebar frame");
+diff --git a/src/client/shell/tests/endpoints.rs b/src/client/shell/tests/endpoints.rs
+--- a/src/client/shell/tests/endpoints.rs
++++ b/src/client/shell/tests/endpoints.rs
+@@ -355,11 +355,12 @@
+     for saved_machine in [false, true] {
+         for scroll_to_bottom in [false, true] {
+             let (mut state, _) = state_with_scrollable_agents();
++            // One-line tree leaves need a shorter viewport to force local overflow.
+             if !saved_machine {
+                 state.set_endpoint_catalog(&[]);
+             }
+             state.agent_scroll = if scroll_to_bottom { usize::MAX } else { 0 };
+-            let frame = state.compose(100, 28).expect("overflowing agent panel");
++            let frame = state.compose(100, 20).expect("overflowing agent panel");
+             assert!(!state.hits.agent_scrollbar.is_empty());
+             let scroll = state.agent_scroll;
+ 
+@@ -381,7 +382,7 @@
+             assert_eq!(state.agent_scroll, scroll);
+             assert!(state.chrome_drag.is_none());
+ 
+-            state.compose(100, 28).expect("collapsed sidebar");
++            state.compose(100, 20).expect("collapsed sidebar");
+             let toggle = state.hits.sidebar_toggle;
+             let outcome = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+                 kind: MouseEventKind::Down(MouseButton::Left),
+@@ -1263,6 +1264,8 @@
+     use crate::config::{AgentSidebarToken, StatusIndicatorStyle};
+ 
+     let mut config = Config::default();
++    // Grouped mode now uses tree leaves; retain configured-row coverage in priority.
++    config.ui.agent_panel_sort = crate::config::AgentPanelSortConfig::Priority;
+     config.ui.status_indicators = StatusIndicatorStyle::Symbols;
+     config.ui.sidebar.agents.rows = vec![vec![
+         AgentSidebarToken::StateIcon,
+@@ -1297,7 +1300,7 @@
+         .join("\n");
+     assert!(text.contains("○ Local · local agent"), "frame: {text}");
+     assert!(text.contains("× Build · remote agent"), "frame: {text}");
+-    assert!(text.contains("grouped"), "frame: {text}");
++    assert!(text.contains("priority"), "frame: {text}");
+     let toggle = state.hits.agent_sort_toggle;
+     assert!(!toggle.is_empty());
+     let click = state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+@@ -1308,7 +1311,7 @@
+     })]);
+     assert_eq!(
+         state.config.agent_panel_sort,
+-        crate::config::AgentPanelSortConfig::Priority
++        crate::config::AgentPanelSortConfig::Spaces
+     );
+     assert!(click.actions.is_empty());
+ 
+@@ -2200,59 +2203,79 @@
+     use crate::api::schema::AgentStatus;
+     use crate::config::{AgentSidebarToken, StatusIndicatorStyle};
+ 
+-    let (mut state, endpoint_id) = state_with_remote();
+-    state.config.status_indicators = StatusIndicatorStyle::Symbols;
+-    state.config.agents.rows = vec![vec![
+-        AgentSidebarToken::StateIcon,
+-        AgentSidebarToken::Machine,
+-        AgentSidebarToken::Agent,
+-    ]];
+-    let endpoint = state
+-        .endpoints
+-        .iter_mut()
+-        .find(|endpoint| endpoint.endpoint_id == endpoint_id)
+-        .expect("remote endpoint");
+-    endpoint.snapshot.as_mut().expect("remote snapshot").agents =
+-        vec![agent("remote agent", AgentStatus::Blocked, 1)];
+-    assert!(state.activate_endpoint_projection(&endpoint_id));
+-    let mut remote_surface = surface();
+-    remote_surface.boot_id = "remote-boot".into();
+-    state.set_pane_surface(remote_surface);
+-    state.pending_integration_installs = 2;
+-
+-    state.mark_endpoint_disconnected(&endpoint_id);
+-    let frame = state.compose(100, 28).expect("frozen endpoint frame");
+-    let text = frame
+-        .cells
+-        .chunks(frame.width as usize)
+-        .map(|row| {
+-            row.iter()
+-                .map(|cell| cell.symbol.as_str())
+-                .collect::<String>()
+-        })
+-        .collect::<Vec<_>>()
+-        .join("\n");
+-
+-    assert_eq!(state.pending_integration_installs, 0);
+-    assert_eq!(
+-        state.endpoint_status(&endpoint_id),
+-        Some(ClientEndpointStatus::Reconnecting)
+-    );
+-    assert!(text.contains("◐ reconnecting"), "frame: {text}");
+-    assert!(text.contains("Build · remote agent"), "frame: {text}");
+-    assert!(
+-        text.contains("LIVE"),
+-        "frozen surface should remain: {text}"
+-    );
+-    assert!(state.hits.panes.is_empty());
+-    assert!(frame.cursor.is_none());
+-    let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
+-    let stale_icon = buffer
+-        .content()
+-        .iter()
+-        .find(|cell| cell.symbol() == "×")
+-        .expect("stale blocked icon");
+-    assert_eq!(stale_icon.fg, state.config.palette.overlay0);
++    for sort in [
++        crate::config::AgentPanelSortConfig::Spaces,
++        crate::config::AgentPanelSortConfig::Priority,
++    ] {
++        let (mut state, endpoint_id) = state_with_remote();
++        state.config.agent_panel_sort = sort;
++        state.sidebar_width = 44;
++        state.config.status_indicators = StatusIndicatorStyle::Symbols;
++        state.config.agents.rows = vec![vec![
++            AgentSidebarToken::StateIcon,
++            AgentSidebarToken::Machine,
++            AgentSidebarToken::Agent,
++        ]];
++        let endpoint = state
++            .endpoints
++            .iter_mut()
++            .find(|endpoint| endpoint.endpoint_id == endpoint_id)
++            .expect("remote endpoint");
++        endpoint.snapshot.as_mut().expect("remote snapshot").agents =
++            vec![agent("remote agent", AgentStatus::Blocked, 1)];
++        assert!(state.activate_endpoint_projection(&endpoint_id));
++        let mut remote_surface = surface();
++        remote_surface.boot_id = "remote-boot".into();
++        state.set_pane_surface(remote_surface);
++        state.pending_integration_installs = 2;
++
++        state.mark_endpoint_disconnected(&endpoint_id);
++        let frame = state.compose(100, 28).expect("frozen endpoint frame");
++        let text = frame
++            .cells
++            .chunks(frame.width as usize)
++            .map(|row| {
++                row.iter()
++                    .map(|cell| cell.symbol.as_str())
++                    .collect::<String>()
++            })
++            .collect::<Vec<_>>()
++            .join("\n");
++
++        assert_eq!(state.pending_integration_installs, 0);
++        assert_eq!(
++            state.endpoint_status(&endpoint_id),
++            Some(ClientEndpointStatus::Reconnecting)
++        );
++        assert!(text.contains("reconnecting"), "frame: {text}");
++        if sort == crate::config::AgentPanelSortConfig::Priority {
++            assert!(text.contains("Build · remote agent"), "frame: {text}");
++        } else {
++            assert!(text.contains("× blocked remote agent"), "frame: {text}");
++            assert!(
++                text.contains("Build") && text.contains("stale"),
++                "frame: {text}"
++            );
++            assert!(state
++                .hits
++                .endpoint_agents
++                .iter()
++                .any(|(_, endpoint, pane)| endpoint == &endpoint_id && pane == "pane_1"));
++        }
++        assert!(
++            text.contains("LIVE"),
++            "frozen surface should remain: {text}"
++        );
++        assert!(state.hits.panes.is_empty());
++        assert!(frame.cursor.is_none());
++        let buffer = frame.to_ratatui_buffer().expect("frame should reconstruct");
++        let stale_icon = buffer
++            .content()
++            .iter()
++            .find(|cell| cell.symbol() == "×")
++            .expect("stale blocked icon");
++        assert_eq!(stale_icon.fg, state.config.palette.overlay0);
++    }
+ }
+ 
+ #[cfg(unix)]
+diff --git a/src/client/shell/tests/mod.rs b/src/client/shell/tests/mod.rs
+--- a/src/client/shell/tests/mod.rs
++++ b/src/client/shell/tests/mod.rs
+@@ -245,6 +245,7 @@
+     surface
+ }
+ 
++mod agent_tree;
+ mod agents_worktrees_notifications;
+ mod chrome_context;
+ mod close_pane;
