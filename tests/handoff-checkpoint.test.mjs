@@ -10,7 +10,7 @@ import { handoffCheckpoint } from '../tools/handoff-checkpoint.mjs';
 
 const cli = fileURLToPath(new URL('../tools/handoff-checkpoint.mjs', import.meta.url));
 const powershell = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-let windowsFixtureDiagnosed = false;
+const fixtureTemp = process.platform === 'win32' ? fs.realpathSync.native(tmpdir()) : tmpdir();
 
 function command(binary, args, options = {}) {
   const result = spawnSync(binary, args, { encoding: 'utf8', shell: false, windowsHide: true, ...options });
@@ -34,7 +34,7 @@ function protect(directory) {
 }
 
 function fixture(t) {
-  const directory = mkdtempSync(path.join(tmpdir(), 'handoff-test-'));
+  const directory = mkdtempSync(path.join(fixtureTemp, 'handoff-test-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const project = path.join(directory, 'project space 世界');
   const privateDir = path.join(directory, 'private');
@@ -48,13 +48,6 @@ function fixture(t) {
   writeFileSync(path.join(project, 'tracked space 世界.txt'), 'original secret body\n');
   git('add', '--all');
   git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'synthetic');
-  if (process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true' && !windowsFixtureDiagnosed) {
-    windowsFixtureDiagnosed = true;
-    const reportedRoot = git('rev-parse', '--show-toplevel').trim();
-    let canonicalRoot;
-    try { canonicalRoot = fs.realpathSync(reportedRoot); } catch { canonicalRoot = 'unavailable'; }
-    console.log('Synthetic Git-root fixture:', JSON.stringify({ project, reportedRoot, canonicalRoot, relative: path.relative(reportedRoot, project) }));
-  }
   const output = path.join(privateDir, 'checkpoint.md');
   const args = ['--project', project, '--workspace', 'w-selected', '--pane', 'p-selected', '--private-output', output, '--next-step', 'Review selected work'];
   return { directory, project, privateDir, output, args, git };
@@ -78,7 +71,7 @@ function mockNative(f, change = x => x) {
 }
 
 test('Windows ACL scripts ignore inherited incompatible Security modules', { skip: process.platform !== 'win32' }, t => {
-  const directory = mkdtempSync(path.join(tmpdir(), 'handoff-test-'));
+  const directory = mkdtempSync(path.join(fixtureTemp, 'handoff-test-'));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const module = path.join(directory, 'Microsoft.PowerShell.Security');
   mkdirSync(module);
@@ -102,6 +95,9 @@ test('Windows ACL scripts ignore inherited incompatible Security modules', { ski
 
 test('manual snapshot: actual HEAD, branch and dirty/untracked names only; private exclusive output', t => {
   const f = fixture(t);
+  assert.equal(path.basename(f.project), 'project space 世界');
+  assert.equal(path.relative(fs.realpathSync.native(f.project), f.project), '');
+  assert.equal(path.relative(f.git('rev-parse', '--show-toplevel').replace(/\r?\n$/, ''), f.project), '');
   writeFileSync(path.join(f.project, 'tracked space 世界.txt'), 'SECRET_DIFF_BODY\n');
   writeFileSync(path.join(f.project, 'untracked 世界 file.txt'), 'SECRET_UNTRACKED_BODY');
   const result = handoffCheckpoint(f.args, { now: () => new Date('2026-10-24T00:00:00Z') });

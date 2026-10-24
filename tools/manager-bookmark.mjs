@@ -48,19 +48,61 @@ export function parseArgs(argv) {
   return options;
 }
 
-// Read ACLs only. A private parent makes inherited ACLs private at file creation.
-const ACL_CHECK = `$ErrorActionPreference = 'Stop'
+const WINDOWS_SECURITY = `$ErrorActionPreference = 'Stop'
 Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-$acl = Get-Acl -LiteralPath $env:MANAGER_BOOKMARK_ACL_PATH
-if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid) { exit 1 }
-$descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
-if ($null -eq $descriptor.DiscretionaryAcl) { exit 1 }
-$allowed = @($sid, 'S-1-5-18', 'S-1-5-32-544')
-foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
-  if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $allowed) { exit 1 }
+function Assert-PrivateAcl($acl) {
+  if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid) { throw 'State owner is not the current user.' }
+  $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new($acl.GetSecurityDescriptorBinaryForm(), 0)
+  if ($null -eq $descriptor.DiscretionaryAcl) { throw 'State DACL is null.' }
+  $allowed = @($sid, 'S-1-5-18', 'S-1-5-32-544')
+  foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+    if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -notin $allowed) { throw 'State DACL is not private.' }
+  }
 }
-Write-Output 'private'
+`;
+const ACL_CHECK = `${WINDOWS_SECURITY}
+Assert-PrivateAcl (Get-Acl -LiteralPath $env:MANAGER_BOOKMARK_ACL_PATH)
+[Console]::Out.Write('private')
+`;
+// Explicit security at CreateNew avoids elevated-token default ownership.
+const WINDOWS_CREATE = `${WINDOWS_SECURITY}
+$data = [byte[]]::new(16385)
+$inputStream = [Console]::OpenStandardInput()
+$count = 0
+while ($count -lt $data.Length) {
+  $n = $inputStream.Read($data, $count, $data.Length - $count)
+  if ($n -eq 0) { break }
+  $count += $n
+}
+if ($count -eq 0 -or $count -gt 16384) { throw 'State exceeds the 16 KiB limit or is empty.' }
+if ($count -ge 3 -and $data[0] -eq 239 -and $data[1] -eq 187 -and $data[2] -eq 191) { throw 'State must not have a BOM.' }
+$utf8 = [Text.UTF8Encoding]::new($false, $true)
+$null = $utf8.GetString($data, 0, $count)
+$parent = [IO.Path]::GetDirectoryName($env:MANAGER_BOOKMARK_ACL_PATH)
+for ($directory = [IO.DirectoryInfo]::new($parent); $null -ne $directory; $directory = $directory.Parent) {
+  if (-not $directory.Exists -or ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'State parent is missing or traverses a reparse point.' }
+}
+Assert-PrivateAcl (Get-Acl -LiteralPath $parent)
+$owner = [Security.Principal.SecurityIdentifier]::new($sid)
+$security = [Security.AccessControl.FileSecurity]::new()
+$security.SetOwner($owner)
+$security.SetAccessRuleProtection($true, $false)
+$security.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($owner, 'FullControl', 'Allow'))
+$stream = [IO.FileStream]::new($env:MANAGER_BOOKMARK_ACL_PATH, [IO.FileMode]::CreateNew,
+  [Security.AccessControl.FileSystemRights]'Write,ReadPermissions', [IO.FileShare]::None, 4096, [IO.FileOptions]::None, $security)
+try {
+  if ($stream.Length -ne 0) { throw 'New state is not empty.' }
+  $actual = $stream.GetAccessControl()
+  Assert-PrivateAcl $actual
+  if (-not $actual.AreAccessRulesProtected) { throw 'New state DACL is not protected.' }
+  foreach ($rule in $actual.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+    if ($rule.AccessControlType -eq 'Allow' -and $rule.IdentityReference.Value -ne $sid) { throw 'New state DACL is not user-only.' }
+  }
+  $stream.Write($data, 0, $count)
+  $stream.Flush($true)
+} finally { $stream.Dispose() }
+[Console]::Out.Write('created')
 `;
 
 export function privateState(file, { io = fs, platform = process.platform, uid = process.getuid?.(), spawn = spawnSync, env = process.env } = {}) {
@@ -74,13 +116,16 @@ export function privateState(file, { io = fs, platform = process.platform, uid =
       if (current === path.dirname(current)) break;
     }
   }
+  function windows(script, target, input) {
+    check(env.SystemRoot && /^[a-z]:\\Windows$/i.test(env.SystemRoot), 'Cannot locate trusted Windows PowerShell for ACL verification.');
+    return spawn(path.win32.join(env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+      ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+      { shell: false, encoding: 'utf8', timeout: 10000, maxBuffer: 4096, input,
+        env: { ...env, MANAGER_BOOKMARK_ACL_PATH: target } });
+  }
   function privateAccess(target, stat) {
     if (platform === 'win32') {
-      check(env.SystemRoot && /^[a-z]:\\Windows$/i.test(env.SystemRoot), 'Cannot locate trusted Windows PowerShell for ACL verification.');
-      const result = spawn(path.win32.join(env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', ACL_CHECK],
-        { shell: false, encoding: 'utf8', timeout: 10000, maxBuffer: 4096,
-          env: { ...env, MANAGER_BOOKMARK_ACL_PATH: target } });
+      const result = windows(ACL_CHECK, target);
       check(!result.error && !result.signal && result.status === 0 && result.stdout.trim() === 'private', 'State requires a user-owned private ACL (user, SYSTEM, Administrators only).');
     } else {
       check(Number.isInteger(uid) && stat.uid === BigInt(uid) && (stat.mode & 0o077n) === 0n, 'State requires user ownership and private permissions (directory 0700/file 0600).');
@@ -92,13 +137,23 @@ export function privateState(file, { io = fs, platform = process.platform, uid =
   }
   return {
     create(record) {
+      const json = JSON.stringify(record, null, 2);
+      check(typeof json === 'string', 'State must serialize as JSON.');
+      const data = Buffer.from(`${json}\n`, 'utf8');
+      check(data.length <= 16384, 'State exceeds the 16 KiB limit.');
       parentCheck();
+      if (platform === 'win32') {
+        const result = windows(WINDOWS_CREATE, file, data);
+        check(!result.error && !result.signal && result.status === 0 && result.stdout.trim() === 'created',
+          'Windows private state creation failed; target may exist or an exclusive artifact may remain. No retry or fallback.');
+        return;
+      }
       const fd = io.openSync(file, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | (fs.constants.O_NOFOLLOW ?? 0), 0o600);
       try {
         const stat = io.fstatSync(fd, { bigint: true });
         check(stat.isFile() && stat.nlink === 1n, 'State must be a regular unlinked-to-others file.');
         privateAccess(file, stat);
-        io.writeFileSync(fd, `${JSON.stringify(record, null, 2)}\n`, 'utf8');
+        io.writeFileSync(fd, data);
         io.fsyncSync(fd);
       } finally { io.closeSync(fd); }
       // On failure retain the exclusive file; never unlink a potentially replaced path.

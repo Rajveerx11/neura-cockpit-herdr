@@ -10,7 +10,7 @@ const absolute = name => path.resolve(os.tmpdir(), name);
 const endpoint = absolute('bookmark-synthetic.sock');
 const binary = absolute(process.platform === 'win32' ? 'synthetic-herdr.exe' : 'synthetic-herdr');
 const stateFile = absolute('synthetic-bookmark.json');
-let windowsFixtureDiagnosed = false;
+const creationFailure = /EEXIST|Windows private state creation failed/;
 const pane = { pane_id: 'w1:p1', terminal_id: 'terminal_1', workspace_id: 'w1', tab_id: 'w1:t1', focused: false, revision: 1 };
 const record = { version: 1, diagnostic_only: true, endpoint, server_identity: null, boot_identity: null,
   ...Object.fromEntries(['pane_id', 'terminal_id', 'workspace_id', 'tab_id'].map(key => [key, pane[key]])) };
@@ -160,18 +160,6 @@ function directory(t, env = process.env) {
         "$ErrorActionPreference='Stop'; Import-Module \"$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1\" -ErrorAction Stop; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:BOOKMARK_TEST_DIRECTORY -AclObject $acl"],
       { env: { ...env, BOOKMARK_TEST_DIRECTORY: dir }, encoding: 'utf8', shell: false, timeout: 10000 });
     assert.equal(result.status, 0, result.stderr);
-    if (process.env.GITHUB_ACTIONS === 'true' && !windowsFixtureDiagnosed) {
-      windowsFixtureDiagnosed = true;
-      const probe = path.join(dir, 'synthetic-owner-probe');
-      fs.writeFileSync(probe, '', { flag: 'wx' });
-      const diagnostic = spawnSync(path.win32.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
-        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-          '$ErrorActionPreference="Stop"; Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop; $id=[Security.Principal.WindowsIdentity]::GetCurrent(); $acl=Get-Acl -LiteralPath $env:BOOKMARK_TEST_PROBE; $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; [Console]::Out.Write("OwnerMatchesUser="+($owner -eq $id.User.Value)+";OwnerMatchesTokenOwner="+($owner -eq $id.Owner.Value)+";OwnerIsAdministrators="+($owner -eq "S-1-5-32-544"))'],
-        { env: { ...env, BOOKMARK_TEST_PROBE: probe }, encoding: 'utf8', shell: false, timeout: 10000 });
-      fs.unlinkSync(probe);
-      assert.equal(diagnostic.status, 0, diagnostic.stderr);
-      console.log('Synthetic new-file owner fixture:', diagnostic.stdout.trim());
-    }
   } else fs.chmodSync(dir, 0o700);
   return dir;
 }
@@ -197,7 +185,7 @@ test('inherited incompatible Security module cannot break fixture or private sta
   const store = privateState(path.join(dir, 'bookmark.json'), { env });
   store.create(record);
   assert.deepEqual(store.read(), record);
-  assert.throws(() => store.create(record), /EEXIST/);
+  assert.throws(() => store.create(record), creationFailure);
   assert.equal(process.env.PSModulePath, inherited);
 });
 
@@ -207,7 +195,7 @@ test('private native state roundtrip, exclusive create, no overwrite', t => {
   store.create(record);
   assert.deepEqual(store.read(), record);
   const original = fs.readFileSync(file);
-  assert.throws(() => store.create({ replacement: true }), /EEXIST/);
+  assert.throws(() => store.create({ replacement: true }), creationFailure);
   assert.deepEqual(fs.readFileSync(file), original);
   if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
 });
@@ -251,7 +239,7 @@ test('existing symlink target is never overwritten', t => {
   const dir = directory(t), real = path.join(dir, 'real'), link = path.join(dir, 'link');
   fs.mkdirSync(real, { mode: 0o700 });
   fs.symlinkSync(real, link, process.platform === 'win32' ? 'junction' : 'dir');
-  assert.throws(() => privateState(link).create(record), /EEXIST/);
+  assert.throws(() => privateState(link).create(record), creationFailure);
   assert.throws(() => privateState(link).read(), /symlinks\/junctions/);
   assert.equal(fs.lstatSync(link).isSymbolicLink(), true);
 });
@@ -267,7 +255,7 @@ test('state file replacement between lstat and open is rejected', t => {
   assert.throws(() => privateState(file, { io }).read(), /changed during open/);
 });
 
-test('failed write closes descriptor, retains exclusive file, never retries', t => {
+test('POSIX Node write failure closes descriptor and retains exclusive file', { skip: process.platform === 'win32' }, t => {
   const dir = directory(t), file = path.join(dir, 'bookmark.json');
   let closed = 0;
   const io = { ...fs, writeFileSync() { throw new Error('synthetic disk failure'); },
@@ -276,6 +264,171 @@ test('failed write closes descriptor, retains exclusive file, never retries', t 
   assert.equal(closed, 1);
   assert.equal(fs.statSync(file).size, 0);
   assert.throws(() => privateState(file).create(record), /EEXIST/);
+});
+
+test('serialized UTF-8 size is bounded before any I/O', () => {
+  const io = { lstatSync() { assert.fail('Oversized input must not reach filesystem checks.'); } };
+  for (const value of [{ text: '界'.repeat(6000) }, undefined]) {
+    assert.throws(() => privateState(stateFile, { io, spawn: () => assert.fail('Unexpected native call') }).create(value), /16 KiB|serialize/);
+  }
+});
+
+function powershell(script, env = {}, input) {
+  return spawnSync(path.win32.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    { env: { ...process.env, ...env }, input, shell: false, encoding: 'utf8', timeout: 10000 });
+}
+
+test('Windows creation sets explicit owner and protected user-only DACL; Unicode travels stdin', { skip: process.platform !== 'win32' }, t => {
+  const dir = directory(t), file = path.join(dir, "state '$literal-界.json");
+  const payload = { text: "界 😀 café $(throw 'never execute')" };
+  let writes = 0;
+  const store = privateState(file, { spawn(exe, argv, options) {
+    if (options.input) {
+      writes++;
+      assert.ok(Buffer.isBuffer(options.input));
+      assert.deepEqual(JSON.parse(options.input.toString('utf8')), payload);
+      assert.ok(!argv.join(' ').includes(payload.text));
+      assert.ok(!argv.join(' ').includes(file));
+    }
+    return spawnSync(exe, argv, options);
+  } });
+  store.create(payload);
+  assert.equal(writes, 1);
+  assert.deepEqual(store.read(), payload);
+  assert.deepEqual(fs.readFileSync(file), Buffer.from(`${JSON.stringify(payload, null, 2)}\n`));
+  const result = powershell(`$ErrorActionPreference='Stop'
+Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
+$sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+$acl=Get-Acl -LiteralPath $env:BOOKMARK_TEST_FILE
+if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid -or -not $acl.AreAccessRulesProtected) { throw 'Incorrect owner/protection' }
+$rules=$acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
+if ($rules.Count -ne 1 -or $rules[0].IdentityReference.Value -ne $sid -or $rules[0].AccessControlType -ne 'Allow') { throw 'Not user-only' }
+[Console]::Out.Write('verified')`, { BOOKMARK_TEST_FILE: file });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout, 'verified');
+});
+
+test('Windows native creation failure never retries or falls back to Node writes', { skip: process.platform !== 'win32' }, t => {
+  const dir = directory(t), file = path.join(dir, 'bookmark.json');
+  for (const failure of [{ status: 1, stdout: '' }, { status: 0, stdout: 'unexpected' },
+    { status: null, error: { code: 'ETIMEDOUT' } }, { status: 0, signal: 'SIGTERM' }]) {
+    let calls = 0;
+    const io = { ...fs, openSync() { assert.fail('Windows must not use Node creation.'); }, writeFileSync() { assert.fail('No fallback writes.'); } };
+    const store = privateState(file, { io, spawn(exe, argv, options) {
+      if (options.input) { calls++; return failure; }
+      return spawnSync(exe, argv, options);
+    } });
+    assert.throws(() => store.create(record), /Windows private state creation failed/);
+    assert.equal(calls, 1);
+    assert.equal(fs.existsSync(file), false);
+  }
+});
+
+test('Windows native writer validates bytes and parent again before exclusive creation', { skip: process.platform !== 'win32' }, t => {
+  const dir = directory(t), file = path.join(dir, 'bookmark.json');
+  let writer;
+  assert.throws(() => privateState(file, { spawn(exe, argv, options) {
+    if (options.input) { writer = { exe, argv, options }; return { status: 1, stdout: '' }; }
+    return spawnSync(exe, argv, options);
+  } }).create(record), /Windows private state creation failed/);
+  for (const input of [Buffer.alloc(16385, 32), Buffer.from([0xff]), Buffer.from('\ufeff{}'), Buffer.alloc(0)]) {
+    const result = spawnSync(writer.exe, writer.argv, { ...writer.options, input });
+    assert.notEqual(result.status, 0);
+    assert.equal(fs.existsSync(file), false);
+  }
+  const result = spawnSync(writer.exe, writer.argv, { ...writer.options,
+    env: { ...writer.options.env, MANAGER_BOOKMARK_ACL_PATH: path.join(dir, 'missing', 'state.json') } });
+  assert.notEqual(result.status, 0);
+  assert.equal(fs.existsSync(file), false);
+  const size = Buffer.byteLength(`${JSON.stringify({ text: '' }, null, 2)}\n`);
+  const exact = { text: '界'.repeat(1000) + 'x'.repeat(16384 - size - 3000) };
+  privateState(file).create(exact);
+  assert.equal(fs.statSync(file).size, 16384);
+  assert.deepEqual(privateState(file).read(), exact);
+});
+
+test('Windows handle ACL rejection retains empty exclusive artifact without content writes', { skip: process.platform !== 'win32' }, t => {
+  const dir = directory(t), file = path.join(dir, 'bookmark.json');
+  const store = privateState(file, { spawn(exe, argv, options) {
+    if (options.input) argv = [...argv.slice(0, -1), argv.at(-1).replace('$actual = $stream.GetAccessControl()', "throw 'Synthetic handle ACL verification failure'")];
+    return spawnSync(exe, argv, options);
+  } });
+  assert.throws(() => store.create(record), /Windows private state creation failed/);
+  assert.equal(fs.statSync(file).size, 0);
+  assert.throws(() => privateState(file).create(record), creationFailure);
+  assert.equal(fs.statSync(file).size, 0);
+});
+
+test('Windows existing empty default-owner file stays unchanged (Administrators on elevated runners)', { skip: process.platform !== 'win32' }, t => {
+  const dir = directory(t), file = path.join(dir, 'existing.json');
+  // Elevated runners supply Administrators here; local unelevated tokens cannot assign that owner.
+  fs.writeFileSync(file, '', { flag: 'wx' });
+  const result = powershell(`$ErrorActionPreference='Stop'
+Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
+$acl=Get-Acl -LiteralPath $env:BOOKMARK_TEST_FILE
+if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne [Security.Principal.WindowsIdentity]::GetCurrent().Owner.Value) { throw 'Fixture owner differs from default token owner' }
+[Console]::Out.Write($acl.Sddl)`, { BOOKMARK_TEST_FILE: file });
+  assert.equal(result.status, 0, result.stderr);
+  const before = fs.statSync(file, { bigint: true });
+  assert.throws(() => privateState(file).create(record), creationFailure);
+  assert.throws(() => privateState(file).read(), result.stdout.startsWith('O:BA') ? /private ACL/ : SyntaxError);
+  const after = fs.statSync(file, { bigint: true });
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, 0n);
+  const security = powershell(`Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
+[Console]::Out.Write((Get-Acl -LiteralPath $env:BOOKMARK_TEST_FILE).Sddl)`, { BOOKMARK_TEST_FILE: file });
+  assert.equal(security.status, 0, security.stderr);
+  assert.equal(security.stdout, result.stdout);
+});
+
+test('Windows shared ACL guard rejects foreign owner, null DACL and foreign allow rules', { skip: process.platform !== 'win32' }, t => {
+  const dir = directory(t), file = path.join(dir, 'state.json');
+  let script;
+  assert.throws(() => privateState(file, { spawn(exe, argv) {
+    script = argv.at(-1);
+    return { status: 1, stdout: '' };
+  } }).create(record), /private ACL/);
+  const definitions = script.slice(0, script.lastIndexOf('\nAssert-PrivateAcl (Get-Acl'));
+  for (const [sddl, error] of [
+    ['O:BAD:P(A;;FA;;;$sid)', /owner is not/],
+    ['O:$sid' + 'D:NO_ACCESS_CONTROL', /DACL is null/],
+    ['O:$sid' + 'D:P(A;;FA;;;$sid)(A;;FR;;;WD)', /DACL is not private/],
+  ]) {
+    const result = powershell(`${definitions}
+$acl=[Security.AccessControl.FileSecurity]::new()
+$acl.SetSecurityDescriptorSddlForm($env:BOOKMARK_TEST_SDDL.Replace('$sid',$sid))
+Assert-PrivateAcl $acl`, { BOOKMARK_TEST_SDDL: sddl });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, error);
+    assert.equal(fs.existsSync(file), false);
+  }
+});
+
+test('Windows nonprivate parent rejected by both Node preflight and native recheck', { skip: process.platform !== 'win32' }, t => {
+  const dir = directory(t), bad = path.join(dir, 'nonprivate'), file = path.join(bad, 'state.json');
+  const result = powershell(`$ErrorActionPreference='Stop'
+$user=[Security.Principal.WindowsIdentity]::GetCurrent().User
+$acl=[Security.AccessControl.DirectorySecurity]::new()
+$acl.SetOwner($user)
+$acl.SetAccessRuleProtection($true,$false)
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($user,'FullControl','ContainerInherit,ObjectInherit','None','Allow'))
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-1-0'),'ReadAndExecute','ContainerInherit,ObjectInherit','None','Allow'))
+$null=[IO.Directory]::CreateDirectory($env:BOOKMARK_TEST_DIRECTORY,$acl)`, { BOOKMARK_TEST_DIRECTORY: bad });
+  assert.equal(result.status, 0, result.stderr);
+  let writes = 0;
+  assert.throws(() => privateState(file, { spawn(exe, argv, options) {
+    if (options.input) writes++;
+    return spawnSync(exe, argv, options);
+  } }).create(record), /private ACL/);
+  assert.equal(writes, 0);
+  assert.equal(fs.existsSync(file), false);
+  assert.throws(() => privateState(path.join(dir, 'state.json'), { spawn(exe, argv, options) {
+    if (options.input) options = { ...options, env: { ...options.env, MANAGER_BOOKMARK_ACL_PATH: file } };
+    return spawnSync(exe, argv, options);
+  } }).create(record), /Windows private state creation failed/);
+  assert.equal(fs.existsSync(file), false);
+  assert.equal(fs.existsSync(path.join(dir, 'state.json')), false);
 });
 
 test('Windows ACL check fails closed on timeout, malformed output or missing trusted shell path', { skip: process.platform !== 'win32' }, t => {
