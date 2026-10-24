@@ -45,7 +45,7 @@ The executable retains the earlier optional local image/attention patch stack. T
 | Broader client-shell tests | 395 passed, 3 ignored |
 | Formatting and Clippy with warnings denied | Passed, exit 0 |
 | Explicit debug 1/15-pane profile | Passed; supporting debug evidence only, not release performance |
-| Combined Node patch/helper suites on Windows and Linux | 52 passed, 1 platform-specific skip on each; exit 0 |
+| Combined Node patch/helper suites | Windows: 54 passed, 1 skipped; Linux: 52 passed, 3 skipped; exit 0, including Windows module-path regressions |
 | Doctor plus identity/integration PowerShell suites | 43 passed; exit 0 |
 | Private installer fixtures | Dry-run, destination-drift refusal, exclusive writes, backup, private ACL and config preservation passed |
 | Installed doctor | Main endpoint/CLI evidence and five helper hashes verified; diagnostic exit 1 correctly flags existing outdated Claude/Codex integrations |
@@ -53,7 +53,7 @@ The executable retains the earlier optional local image/attention patch stack. T
 | Installed checkpoint | New private file created; explicit main-endpoint pane/project identity verified |
 | Installed bundle/helpers and live configuration | Reviewed hashes matched; private base configuration unchanged |
 
-Exact source-stage commands and limits are in the feature guides. CI includes the focused Node suites on both platforms and the doctor suite on Windows; consult the published commit's hosted checks for its result. Private build/install/cleanup receipts and hashes are retained locally, not in Git.
+Exact source-stage commands and limits are in the feature guides. Initial hosted Windows checks exposed inherited PowerShell 7 module paths breaking child Windows PowerShell ACL-command loading. A narrow follow-up pins the runtime and fixture ACL scripts to the child's built-in Security manifest under `$PSHOME`; regressions reproduce the incompatible-module failure without weakening ACL checks or changing global module paths. The installed helper copies, integrity manifest and pinned Doctor wrapper were refreshed with backups; no client rebuild or restart was needed. CI includes the focused Node suites on both platforms and the doctor suite on Windows; consult the published commit's hosted checks for its result. Private build/install/cleanup receipts and hashes are retained locally, not in Git.
 
 The doctor deliberately did not replace outdated integrations. Version-marker freshness, registration correctness, running code and genuine lifecycle delivery remain different facts. Real visual tree interaction, physical key forwarding and Windows notification banners/click routing still require human observation; process/handshake checks do not establish them.
 

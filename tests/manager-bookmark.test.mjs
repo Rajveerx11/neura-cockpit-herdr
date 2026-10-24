@@ -150,18 +150,43 @@ test('help and invalid options do not invoke native calls', () => {
   assert.throws(() => parseArgs(['pin', '--herdr', binary, '--endpoint', endpoint, '--pane', 'manager name']), /explicit pane ID/);
 });
 
-function directory(t) {
+function directory(t, env = process.env) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'manager-bookmark-test-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   if (process.platform === 'win32') {
     const result = spawnSync(path.win32.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
       ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-        "$ErrorActionPreference='Stop'; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:BOOKMARK_TEST_DIRECTORY -AclObject $acl"],
-      { env: { ...process.env, BOOKMARK_TEST_DIRECTORY: dir }, encoding: 'utf8', shell: false, timeout: 10000 });
+        "$ErrorActionPreference='Stop'; Import-Module \"$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1\" -ErrorAction Stop; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:BOOKMARK_TEST_DIRECTORY -AclObject $acl"],
+      { env: { ...env, BOOKMARK_TEST_DIRECTORY: dir }, encoding: 'utf8', shell: false, timeout: 10000 });
     assert.equal(result.status, 0, result.stderr);
   } else fs.chmodSync(dir, 0o700);
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
+
+test('inherited incompatible Security module cannot break fixture or private state ACL checks', { skip: process.platform !== 'win32' }, t => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'manager-bookmark-test-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const module = path.join(root, 'Microsoft.PowerShell.Security');
+  fs.mkdirSync(module);
+  fs.writeFileSync(path.join(module, 'Microsoft.PowerShell.Security.psd1'),
+    "@{ RootModule='Microsoft.PowerShell.Security.psm1'; ModuleVersion='7.0'; FunctionsToExport=@('Get-Acl','Set-Acl'); CmdletsToExport=@() }", { flag: 'wx' });
+  fs.writeFileSync(path.join(module, 'Microsoft.PowerShell.Security.psm1'),
+    "function Get-Acl {}; function Set-Acl {}; throw 'Synthetic module incompatible with Windows PowerShell 5.1'", { flag: 'wx' });
+  const inherited = process.env.PSModulePath;
+  const builtins = path.win32.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/Modules');
+  const env = { ...process.env, PSModulePath: `${root};${builtins}`, BOOKMARK_TEST_DIRECTORY: root };
+  const legacy = spawnSync(path.win32.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference='Stop'; Get-Acl -LiteralPath $env:BOOKMARK_TEST_DIRECTORY"],
+    { env, shell: false, encoding: 'utf8', timeout: 10000 });
+  assert.notEqual(legacy.status, 0, 'Unpinned module loading must reproduce the failure.');
+  assert.match(legacy.stderr, /CouldNotAutoloadMatchingModule/);
+  const dir = directory(t, env);
+  const store = privateState(path.join(dir, 'bookmark.json'), { env });
+  store.create(record);
+  assert.deepEqual(store.read(), record);
+  assert.throws(() => store.create(record), /EEXIST/);
+  assert.equal(process.env.PSModulePath, inherited);
+});
 
 test('private native state roundtrip, exclusive create, no overwrite', t => {
   const dir = directory(t), file = path.join(dir, 'bookmark.json');

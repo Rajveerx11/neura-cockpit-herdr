@@ -50,6 +50,7 @@ export function parseArgs(argv) {
 
 // Read ACLs only. A private parent makes inherited ACLs private at file creation.
 const ACL_CHECK = `$ErrorActionPreference = 'Stop'
+Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $acl = Get-Acl -LiteralPath $env:MANAGER_BOOKMARK_ACL_PATH
 if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid) { exit 1 }

@@ -13,7 +13,7 @@ const powershell = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32'
 
 function command(binary, args, options = {}) {
   const result = spawnSync(binary, args, { encoding: 'utf8', shell: false, windowsHide: true, ...options });
-  assert.equal(result.status, 0, result.stderr || result.error?.message);
+  assert.equal(result.status, 0, result.stderr || result.error?.message || result.stdout);
   return result.stdout;
 }
 
@@ -21,6 +21,7 @@ function protect(directory) {
   if (process.platform !== 'win32') { chmodSync(directory, 0o700); return; }
   command(powershell, ['-NoProfile', '-NonInteractive', '-Command', `
     $ErrorActionPreference = 'Stop'
+    Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
     $acl = [Security.AccessControl.DirectorySecurity]::new()
     $acl.SetOwner($sid)
@@ -68,6 +69,29 @@ function mockNative(f, change = x => x) {
   return { spawn, calls };
 }
 
+test('Windows ACL scripts ignore inherited incompatible Security modules', { skip: process.platform !== 'win32' }, t => {
+  const directory = mkdtempSync(path.join(tmpdir(), 'handoff-test-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const module = path.join(directory, 'Microsoft.PowerShell.Security');
+  mkdirSync(module);
+  writeFileSync(path.join(module, 'Microsoft.PowerShell.Security.psd1'), `@{
+    RootModule = 'incompatible.psm1'
+    ModuleVersion = '99.0.0'
+    PowerShellVersion = '5.1'
+    FunctionsToExport = @('Get-Acl', 'Set-Acl')
+    CmdletsToExport = @()
+  }`);
+  writeFileSync(path.join(module, 'incompatible.psm1'), "function Get-Acl {}\nfunction Set-Acl {}\nthrow 'Incompatible test Security module.'");
+  const env = { ...process.env, PSModulePath: `${directory}${path.delimiter}${process.env.PSModulePath ?? ''}`, TEST_ACL_DIRECTORY: directory };
+  delete env.NODE_TEST_CONTEXT;
+  const unpinned = spawnSync(powershell, ['-NoProfile', '-NonInteractive', '-Command', "$ErrorActionPreference = 'Stop'; Get-Acl -LiteralPath $env:TEST_ACL_DIRECTORY"], { env, encoding: 'utf8', shell: false, windowsHide: true, timeout: 10000 });
+  assert.notEqual(unpinned.status, 0, 'Fixture must reproduce the inherited module-loading failure.');
+  assert.match(unpinned.stderr, /CouldNotAutoloadMatchingModule/);
+  // These existing tests exercise fixture Set-Acl/Get-Acl and real helper acceptance/refusal.
+  const results = command(process.execPath, ['--test', '--test-reporter=tap', '--test-name-pattern=manual snapshot:|refuses shared output directory permissions', fileURLToPath(import.meta.url)], { env, timeout: 30000 });
+  assert.match(results, /# pass 2\b/);
+});
+
 test('manual snapshot: actual HEAD, branch and dirty/untracked names only; private exclusive output', t => {
   const f = fixture(t);
   writeFileSync(path.join(f.project, 'tracked space 世界.txt'), 'SECRET_DIFF_BODY\n');
@@ -86,6 +110,8 @@ test('manual snapshot: actual HEAD, branch and dirty/untracked names only; priva
   if (process.platform !== 'win32') assert.equal(lstatSync(f.output).mode & 0o777, 0o600);
   else {
     const principals = command(powershell, ['-NoProfile', '-NonInteractive', '-Command', `
+      $ErrorActionPreference = 'Stop'
+      Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
       $acl = Get-Acl -LiteralPath $env:TEST_PRIVATE_FILE
       $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
       foreach ($rule in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {

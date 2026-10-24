@@ -56,6 +56,7 @@ function directoryIdentity(directory) {
 const WINDOWS_PRIVATE = `
 $ErrorActionPreference = 'Stop'
 try {
+  Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop
   $target = $env:CHECKPOINT_DIRECTORY
   $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($target))
   if ($drive.DriveType -ne 'Fixed' -or $drive.DriveFormat -ne 'NTFS') { throw 'storage' }
