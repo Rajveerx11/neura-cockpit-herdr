@@ -1,0 +1,450 @@
+diff --git a/src/client/shell/agent_tree.rs b/src/client/shell/agent_tree.rs
+--- a/src/client/shell/agent_tree.rs
++++ b/src/client/shell/agent_tree.rs
+@@ -71,6 +71,42 @@ fn key(endpoint: &ClientEndpointId, snapshot: &ClientShellSnapshot, node: Node)
+     }
+ }
+ 
++#[derive(Default)]
++struct Counts {
++    states: [usize; 5],
++    unavailable: usize,
++}
++
++impl Counts {
++    fn add(&mut self, status: AgentStatus) {
++        let index = match status {
++            AgentStatus::Blocked => 0,
++            AgentStatus::Working => 1,
++            AgentStatus::Done => 2,
++            AgentStatus::Idle => 3,
++            AgentStatus::Unknown => 4,
++        };
++        self.states[index] += 1;
++    }
++
++    fn summary(&self) -> String {
++        let [blocked, working, done, idle, unknown] = self.states;
++        [
++            (self.unavailable, "unavailable"),
++            (blocked, "blocked"),
++            (working, "working"),
++            (done, "native done"),
++            (idle, "idle"),
++            (unknown, "unknown"),
++        ]
++        .into_iter()
++        .filter(|(count, _)| *count > 0)
++        .map(|(count, label)| format!("{count} {label}"))
++        .collect::<Vec<_>>()
++        .join(" ")
++    }
++}
++
+ fn header(
+     key: Key,
+     label: &str,
+@@ -78,11 +114,21 @@ fn header(
+     focused: bool,
+     stale: bool,
+     collapsed: &HashSet<Key>,
++    counts: &Counts,
+ ) -> Row {
+     let is_collapsed = collapsed.contains(&key);
++    let summary = if is_collapsed {
++        counts.summary()
++    } else {
++        String::new()
++    };
+     Row {
+         target: Target::Header(key),
+-        label: label.into(),
++        label: if summary.is_empty() {
++            label.into()
++        } else {
++            format!("{label} | {summary}")
++        },
+         prefix,
+         status: None,
+         state_label: None,
+@@ -140,6 +186,9 @@ pub(super) fn rows(
+         let mut agents_by_tab: HashMap<&str, Vec<&crate::protocol::ClientShellAgent>> =
+             HashMap::new();
+         let mut missing_membership = 0;
++        let mut machine_counts = Counts::default();
++        let mut workspace_counts: HashMap<&str, Counts> = HashMap::new();
++        let mut tab_counts: HashMap<&str, Counts> = HashMap::new();
+         for agent in &snapshot.agents {
+             let tab = tabs.get(agent.tab_id.as_str());
+             // Pane metadata is optional in cached snapshots; only positive conflicts invalidate membership.
+@@ -153,8 +202,19 @@ pub(super) fn rows(
+                 missing_membership += 1;
+                 continue;
+             }
++            // Aggregate validated membership before any ancestor hides its descendants.
++            machine_counts.add(agent.agent_status);
++            workspace_counts
++                .entry(&agent.workspace_id)
++                .or_default()
++                .add(agent.agent_status);
++            tab_counts
++                .entry(&agent.tab_id)
++                .or_default()
++                .add(agent.agent_status);
+             agents_by_tab.entry(&agent.tab_id).or_default().push(agent);
+         }
++        machine_counts.unavailable = missing_membership;
+         let mut tabs_by_workspace: HashMap<&str, Vec<&crate::protocol::ClientShellTab>> =
+             HashMap::new();
+         for tab in &snapshot.tabs {
+@@ -188,6 +248,7 @@ pub(super) fn rows(
+                 active,
+                 stale,
+                 collapsed,
++                &machine_counts,
+             ));
+             if collapsed.contains(&machine_key) {
+                 continue;
+@@ -227,6 +288,9 @@ pub(super) fn rows(
+                 focused,
+                 stale,
+                 collapsed,
++                workspace_counts
++                    .get(workspace.workspace_id.as_str())
++                    .unwrap_or(&Counts::default()),
+             ));
+             if collapsed.contains(&workspace_key) {
+                 continue;
+@@ -248,6 +312,7 @@ pub(super) fn rows(
+                     focused && snapshot.focused_tab_id.as_deref() == Some(&tab.tab_id),
+                     stale,
+                     collapsed,
++                    &tab_counts[tab.tab_id.as_str()],
+                 ));
+                 if collapsed.contains(&tab_key) {
+                     continue;
+diff --git a/src/client/shell/tests/agent_tree.rs b/src/client/shell/tests/agent_tree.rs
+--- a/src/client/shell/tests/agent_tree.rs
++++ b/src/client/shell/tests/agent_tree.rs
+@@ -592,3 +592,321 @@ fn tree_collapsing_bottom_tab_clamps_scroll_and_keeps_focused_lineage() {
+     assert_eq!(state.agent_scroll, state.hits.agent_max_scroll);
+     assert_eq!(leaf_count(&state), 18);
+ }
++
++fn collapse_node(state: &mut ClientShellState, endpoint: &ClientEndpointId, node: Node) {
++    let key = tree_rows(state)
++        .into_iter()
++        .find_map(|row| match row.target {
++            Target::Header(key) if &key.endpoint_id == endpoint && key.node == node => Some(key),
++            _ => None,
++        })
++        .unwrap();
++    state.collapsed_agent_tree.insert(key);
++}
++
++fn attention_snapshot(
++    state: &mut ClientShellState,
++    endpoint: &ClientEndpointId,
++    mut projected: Box<ClientShellSnapshot>,
++) {
++    // Native Done requires an observed completion beyond the client's initial seen watermark.
++    let mut working = projected.clone();
++    working.revision += 1;
++    projected.revision += 2;
++    for (before, after) in working.agents.iter_mut().zip(&mut projected.agents) {
++        if after.agent_status == AgentStatus::Done {
++            before.agent_status = AgentStatus::Working;
++            before.state_change_seq += 1;
++            after.agent_status = AgentStatus::Idle;
++            after.state_change_seq += 2;
++        }
++    }
++    state.set_endpoint_snapshot(endpoint, working);
++    state.set_endpoint_snapshot(endpoint, projected);
++    if endpoint == &state.active_endpoint_id {
++        // No coherent displayed surface: the native completion remains unacknowledged.
++        state.pane_surface = None;
++    }
++}
++
++#[test]
++fn tree_attention_counts_whole_nested_subtrees_and_native_states() {
++    let mut state = tree_state(7);
++    let mut projected = state.snapshot.clone().unwrap();
++    let workspace_id = projected.workspaces[0].workspace_id.clone();
++    let tab_id = projected.tabs[0].tab_id.clone();
++    let mut second_tab = projected.tabs[0].clone();
++    second_tab.tab_id = "second".into();
++    second_tab.label = "second".into();
++    projected.tabs.push(second_tab.clone());
++    let mut second_workspace = projected.workspaces[0].clone();
++    second_workspace.workspace_id = "other".into();
++    second_workspace.label = "other".into();
++    projected.workspaces.push(second_workspace);
++    second_tab.tab_id = "third".into();
++    second_tab.workspace_id = "other".into();
++    projected.tabs.push(second_tab);
++    for (index, status) in [
++        AgentStatus::Blocked,
++        AgentStatus::Working,
++        AgentStatus::Done,
++        AgentStatus::Idle,
++        AgentStatus::Unknown,
++        AgentStatus::Blocked,
++        AgentStatus::Done,
++    ]
++    .into_iter()
++    .enumerate()
++    {
++        projected.agents[index].agent_status = status;
++        projected.agents[index].state_labels = vec![("done".into(), "reviewed".into())];
++        if index >= 5 {
++            let tab = if index == 5 { "second" } else { "third" };
++            projected.agents[index].tab_id = tab.into();
++            projected.panes[index].tab_id = tab.into();
++        }
++    }
++    projected.agents[6].workspace_id = "other".into();
++    projected.panes[6].workspace_id = "other".into();
++    attention_snapshot(&mut state, &ClientEndpointId::Local, projected);
++    let expanded: Vec<_> = tree_rows(&state).into_iter().map(|row| row.label).collect();
++    collapse_node(
++        &mut state,
++        &ClientEndpointId::Local,
++        Node::Tab {
++            workspace_id: workspace_id.clone(),
++            tab_id,
++        },
++    );
++    let rows = tree_rows(&state);
++    assert!(rows.iter().any(|row| {
++        row.label
++            .ends_with(" | 1 blocked 1 working 1 native done 1 idle 1 unknown")
++    }));
++    assert_eq!(leaf_count(&state), 2);
++    collapse_node(
++        &mut state,
++        &ClientEndpointId::Local,
++        Node::Workspace(workspace_id),
++    );
++    assert!(tree_rows(&state).iter().any(|row| {
++        row.label
++            .ends_with(" | 2 blocked 1 working 1 native done 1 idle 1 unknown")
++    }));
++    assert_eq!(leaf_count(&state), 1);
++    collapse_node(
++        &mut state,
++        &ClientEndpointId::Local,
++        Node::Workspace("other".into()),
++    );
++    assert!(tree_rows(&state)
++        .iter()
++        .any(|row| row.label == "other | 1 native done"));
++    assert_eq!(leaf_count(&state), 0);
++    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Reconnecting);
++    collapse_node(&mut state, &ClientEndpointId::Local, Node::Machine);
++    assert_eq!(tree_rows(&state).len(), 1);
++    assert!(tree_rows(&state)[0]
++        .label
++        .ends_with(" | 2 blocked 1 working 2 native done 1 idle 1 unknown"));
++    state.collapsed_agent_tree.clear();
++    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Online);
++    assert_eq!(
++        tree_rows(&state)
++            .into_iter()
++            .map(|row| row.label)
++            .collect::<Vec<_>>(),
++        expanded
++    );
++}
++
++#[test]
++fn tree_attention_missing_and_conflicting_membership_fail_closed() {
++    let mut state = tree_state(5);
++    let mut projected = state.snapshot.clone().unwrap();
++    let workspace = projected.workspaces[0].workspace_id.clone();
++    // Missing optional panes remain valid; missing parents and positive conflicts do not.
++    projected.panes.retain(|pane| pane.pane_id == "pane_4");
++    projected.agents[0].agent_status = AgentStatus::Unknown;
++    projected.agents[1].tab_id = "missing".into();
++    projected.agents[2].workspace_id = "conflict".into();
++    projected.panes[0].tab_id = "conflict".into();
++    let mut orphan_tab = projected.tabs[0].clone();
++    orphan_tab.tab_id = "orphan".into();
++    orphan_tab.workspace_id = "missing".into();
++    projected.tabs.push(orphan_tab);
++    projected.agents[4].tab_id = "orphan".into();
++    projected.agents[4].workspace_id = "missing".into();
++    state.set_snapshot(projected);
++    collapse_node(
++        &mut state,
++        &ClientEndpointId::Local,
++        Node::Workspace(workspace),
++    );
++    let rows = tree_rows(&state);
++    assert_eq!(rows.len(), 2);
++    assert_eq!(rows[0].target, Target::Unavailable);
++    assert!(rows[0].label.contains("2 native agent(s)"));
++    assert!(rows[1].label.ends_with(" | 1 unknown"));
++    state.set_endpoint_status(&ClientEndpointId::Local, ClientEndpointStatus::Reconnecting);
++    collapse_node(&mut state, &ClientEndpointId::Local, Node::Machine);
++    assert!(tree_rows(&state)[0]
++        .label
++        .ends_with(" | 2 unavailable 1 unknown"));
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.tabs.clear();
++    state.set_snapshot(projected);
++    let rows = tree_rows(&state);
++    assert_eq!(rows.len(), 1);
++    assert!(rows[0].label.ends_with(" | 4 unavailable"));
++    assert!(!rows[0].label.contains("unknown"));
++
++    // Conflicting duplicate tab metadata must not fabricate workspace counts or panic.
++    let mut state = tree_state(1);
++    let mut projected = state.snapshot.clone().unwrap();
++    let mut other = projected.workspaces[0].clone();
++    other.workspace_id = "other".into();
++    other.label = "other".into();
++    projected.workspaces.push(other);
++    let mut conflicting_tab = projected.tabs[0].clone();
++    conflicting_tab.workspace_id = "other".into();
++    projected.tabs.insert(0, conflicting_tab);
++    state.set_snapshot(projected);
++    collapse_node(
++        &mut state,
++        &ClientEndpointId::Local,
++        Node::Workspace("other".into()),
++    );
++    assert!(tree_rows(&state).iter().any(|row| row.label == "other"));
++}
++
++#[test]
++fn tree_attention_endpoint_boot_and_hidden_updates_are_isolated() {
++    let mut state = tree_state(2);
++    let remote = SavedSshEndpoint::new("Remote", "dev@example.invalid", "test").unwrap();
++    let remote_id = ClientEndpointId::Ssh(remote.id.clone());
++    state.set_endpoint_catalog(&[remote]);
++    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Online);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.boot_id = "remote-boot".into();
++    projected.agents[0].agent_status = AgentStatus::Done;
++    projected.agents.remove(1);
++    attention_snapshot(&mut state, &remote_id, projected.clone());
++    collapse_node(&mut state, &ClientEndpointId::Local, Node::Machine);
++    collapse_node(&mut state, &remote_id, Node::Machine);
++    let rows = tree_rows(&state);
++    assert_eq!(rows.len(), 2);
++    assert!(rows[0].label.ends_with(" | 2 blocked"));
++    assert_eq!(rows[1].label, "Remote | 1 native done");
++    projected.revision += 3;
++    projected.agents[0].state_change_seq += 3;
++    projected.agents[0].agent_status = AgentStatus::Unknown;
++    state.set_endpoint_snapshot(&remote_id, projected.clone());
++    assert_eq!(tree_rows(&state)[1].label, "Remote | 1 unknown");
++    state.set_endpoint_status(&remote_id, ClientEndpointStatus::Reconnecting);
++    let frame = state.compose(106, 40).unwrap();
++    assert!(frame_text(&frame).contains("stale Remote"));
++    let (rect, _) = state
++        .hits
++        .agent_tree_headers
++        .iter()
++        .find(|(_, key)| key.endpoint_id == remote_id)
++        .unwrap();
++    assert_eq!(
++        frame.to_ratatui_buffer().unwrap()[(rect.x, rect.y)].fg,
++        state.config.palette.overlay0
++    );
++    projected.boot_id = "new-remote-boot".into();
++    state.set_endpoint_snapshot(&remote_id, projected);
++    assert!(tree_rows(&state)[0].label.ends_with(" | 2 blocked"));
++    assert_eq!(tree_rows(&state)[1].label, "Remote");
++    assert_eq!(leaf_count(&state), 1);
++}
++
++#[test]
++fn tree_attention_narrow_headers_remain_single_line_and_action_free() {
++    let mut state = tree_state(1);
++    let mut projected = state.snapshot.clone().unwrap();
++    projected.agents[0].agent_status = AgentStatus::Done;
++    projected.workspaces[0].label = "long workspace\n\u{1b}".repeat(10);
++    attention_snapshot(&mut state, &ClientEndpointId::Local, projected);
++    state.compose(106, 30).unwrap();
++    let header = state.hits.agent_tree_headers[0].0;
++    let before = state.snapshot.clone().unwrap();
++    assert!(click(&mut state, header).actions.is_empty());
++    let rows = tree_rows(&state);
++    for width in [0, 1, 4, 8, 12, 20, 36, 38, 80] {
++        let area = Rect::new(0, 0, width, 6);
++        let mut buffer = Buffer::empty(area);
++        let mut hits = ShellHitMap::default();
++        agent_tree::render(
++            &mut buffer,
++            area,
++            &rows,
++            &state.config,
++            &mut 0,
++            &mut hits,
++            false,
++        );
++        assert!(hits.agents.is_empty() && hits.endpoint_agents.is_empty());
++        for (rect, _) in &hits.agent_tree_headers {
++            assert!(rect.right() <= width && rect.height == 1);
++        }
++        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
++        assert!(!text.chars().any(char::is_control));
++        if width >= 20 {
++            assert!(text.contains("long workspace"));
++        }
++    }
++    state.compose(106, 30).unwrap();
++    assert!(click(&mut state, header).actions.is_empty());
++    assert_eq!(
++        state.snapshot.as_ref().unwrap().agents[0].agent_status,
++        AgentStatus::Done
++    );
++    assert_eq!(
++        state.snapshot.as_ref().unwrap().agents[0].state_change_seq,
++        before.agents[0].state_change_seq
++    );
++    assert_eq!(leaf_count(&state), 1);
++}
++
++#[test]
++fn tree_attention_38_columns_preserve_workspace_and_tab_identity_before_counts() {
++    for is_tab in [false, true] {
++        let mut state = tree_state(1);
++        let mut projected = state.snapshot.clone().unwrap();
++        projected.workspaces[0].label = "Workspace".into();
++        projected.tabs[0].label = "Build".into();
++        projected.agents[0].agent_status = AgentStatus::Done;
++        let workspace_id = projected.workspaces[0].workspace_id.clone();
++        let node = if is_tab {
++            Node::Tab {
++                workspace_id,
++                tab_id: projected.tabs[0].tab_id.clone(),
++            }
++        } else {
++            Node::Workspace(workspace_id)
++        };
++        attention_snapshot(&mut state, &ClientEndpointId::Local, projected);
++        collapse_node(&mut state, &ClientEndpointId::Local, node);
++        let area = Rect::new(0, 0, 38, 6);
++        let mut buffer = Buffer::empty(area);
++        agent_tree::render(
++            &mut buffer,
++            area,
++            &tree_rows(&state),
++            &state.config,
++            &mut 0,
++            &mut ShellHitMap::default(),
++            false,
++        );
++        let text: String = buffer.content.iter().map(|cell| cell.symbol()).collect();
++        let expected = if is_tab {
++            "Build | 1 native done"
++        } else {
++            "Workspace | 1 native done"
++        };
++        assert!(text.contains(expected), "{text}");
++    }
++}

@@ -17,6 +17,14 @@ jobs:
           node-version: '22'
       - name: Native agent tree patch packaging, scope and privacy
         run: node --test tests/agent-tree.test.mjs
+      - name: Optional tree attention, private checkpoint and bookmark diagnostics
+        run: node --test tests/tree-attention.test.mjs tests/handoff-checkpoint.test.mjs tests/manager-bookmark.test.mjs
+      - name: Read-only Cockpit doctor regressions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          powershell.exe -NoProfile -File tests/cockpit-doctor.tests.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Mocked spawning, presets, notes, branding and usage regressions
         run: node --test tests/spawn-agent.test.mjs tests/workspace-preset.test.mjs tests/workspace-notes.test.mjs tests/branding.test.mjs tests/attention-profile.test.mjs tests/focus-keys.test.mjs tests/desktop-notifications.test.mjs plugins/neura-usage/usage-report.test.mjs
       - name: Parse optional patch verification helper
