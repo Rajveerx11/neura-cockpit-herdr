@@ -10,6 +10,7 @@ import { handoffCheckpoint } from '../tools/handoff-checkpoint.mjs';
 
 const cli = fileURLToPath(new URL('../tools/handoff-checkpoint.mjs', import.meta.url));
 const powershell = path.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+let windowsFixtureDiagnosed = false;
 
 function command(binary, args, options = {}) {
   const result = spawnSync(binary, args, { encoding: 'utf8', shell: false, windowsHide: true, ...options });
@@ -47,6 +48,13 @@ function fixture(t) {
   writeFileSync(path.join(project, 'tracked space 世界.txt'), 'original secret body\n');
   git('add', '--all');
   git('-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--quiet', '-m', 'synthetic');
+  if (process.platform === 'win32' && process.env.GITHUB_ACTIONS === 'true' && !windowsFixtureDiagnosed) {
+    windowsFixtureDiagnosed = true;
+    const reportedRoot = git('rev-parse', '--show-toplevel').trim();
+    let canonicalRoot;
+    try { canonicalRoot = fs.realpathSync(reportedRoot); } catch { canonicalRoot = 'unavailable'; }
+    console.log('Synthetic Git-root fixture:', JSON.stringify({ project, reportedRoot, canonicalRoot, relative: path.relative(reportedRoot, project) }));
+  }
   const output = path.join(privateDir, 'checkpoint.md');
   const args = ['--project', project, '--workspace', 'w-selected', '--pane', 'p-selected', '--private-output', output, '--next-step', 'Review selected work'];
   return { directory, project, privateDir, output, args, git };

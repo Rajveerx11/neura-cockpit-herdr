@@ -10,6 +10,7 @@ const absolute = name => path.resolve(os.tmpdir(), name);
 const endpoint = absolute('bookmark-synthetic.sock');
 const binary = absolute(process.platform === 'win32' ? 'synthetic-herdr.exe' : 'synthetic-herdr');
 const stateFile = absolute('synthetic-bookmark.json');
+let windowsFixtureDiagnosed = false;
 const pane = { pane_id: 'w1:p1', terminal_id: 'terminal_1', workspace_id: 'w1', tab_id: 'w1:t1', focused: false, revision: 1 };
 const record = { version: 1, diagnostic_only: true, endpoint, server_identity: null, boot_identity: null,
   ...Object.fromEntries(['pane_id', 'terminal_id', 'workspace_id', 'tab_id'].map(key => [key, pane[key]])) };
@@ -159,6 +160,18 @@ function directory(t, env = process.env) {
         "$ErrorActionPreference='Stop'; Import-Module \"$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1\" -ErrorAction Stop; $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User; $acl=[Security.AccessControl.DirectorySecurity]::new(); $acl.SetOwner($sid); $acl.SetAccessRuleProtection($true,$false); $rule=[Security.AccessControl.FileSystemAccessRule]::new($sid,'FullControl','ContainerInherit,ObjectInherit','None','Allow'); $acl.AddAccessRule($rule); Set-Acl -LiteralPath $env:BOOKMARK_TEST_DIRECTORY -AclObject $acl"],
       { env: { ...env, BOOKMARK_TEST_DIRECTORY: dir }, encoding: 'utf8', shell: false, timeout: 10000 });
     assert.equal(result.status, 0, result.stderr);
+    if (process.env.GITHUB_ACTIONS === 'true' && !windowsFixtureDiagnosed) {
+      windowsFixtureDiagnosed = true;
+      const probe = path.join(dir, 'synthetic-owner-probe');
+      fs.writeFileSync(probe, '', { flag: 'wx' });
+      const diagnostic = spawnSync(path.win32.join(process.env.SystemRoot, 'System32/WindowsPowerShell/v1.0/powershell.exe'),
+        ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
+          '$ErrorActionPreference="Stop"; Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1" -ErrorAction Stop; $id=[Security.Principal.WindowsIdentity]::GetCurrent(); $acl=Get-Acl -LiteralPath $env:BOOKMARK_TEST_PROBE; $owner=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value; [Console]::Out.Write("OwnerMatchesUser="+($owner -eq $id.User.Value)+";OwnerMatchesTokenOwner="+($owner -eq $id.Owner.Value)+";OwnerIsAdministrators="+($owner -eq "S-1-5-32-544"))'],
+        { env: { ...env, BOOKMARK_TEST_PROBE: probe }, encoding: 'utf8', shell: false, timeout: 10000 });
+      fs.unlinkSync(probe);
+      assert.equal(diagnostic.status, 0, diagnostic.stderr);
+      console.log('Synthetic new-file owner fixture:', diagnostic.stdout.trim());
+    }
   } else fs.chmodSync(dir, 0o700);
   return dir;
 }
